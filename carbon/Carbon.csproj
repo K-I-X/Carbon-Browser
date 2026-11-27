@@ -7,7 +7,6 @@
   <Deterministic>true</Deterministic>
   <Version>1.0.0</Version>
   <CarbonBuild Condition="'$(CarbonBuild)' == ''">0</CarbonBuild>
-  <CarbonAiUrl Condition="'$(CarbonAiUrl)' == ''">$(CARBON_AI_URL)</CarbonAiUrl>
   <RuntimeIdentifier>win-x64</RuntimeIdentifier><SelfContained>true</SelfContained>
   <PublishSingleFile>true</PublishSingleFile><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract><EnableCompressionInSingleFile>false</EnableCompressionInSingleFile><PublishReadyToRun>true</PublishReadyToRun><TieredPGO>true</TieredPGO><ConcurrentGarbageCollection>false</ConcurrentGarbageCollection><StartupObject>Carbon.Program</StartupObject>
@@ -16,7 +15,6 @@
  </PropertyGroup>
  <ItemGroup>
   <AssemblyMetadata Include="CarbonBuild" Value="$(CarbonBuild)" />
-  <AssemblyMetadata Include="CarbonAiUrl" Value="$(CarbonAiUrl)" />
   <EmbeddedResource Include="Shell\**\*" LogicalName="Carbon.Content.Shell/%(RecursiveDir)%(Filename)%(Extension)" />
   <EmbeddedResource Include="Assets\Readability.js;Assets\LoginObserver.js;Assets\offline-game.js;Assets\setup.md;Assets\make.md" LogicalName="Carbon.Content.Assets/%(Filename)%(Extension)" />
   <EmbeddedResource Include="Assets\roles\**\*.md" LogicalName="Carbon.Content.Assets/roles/%(RecursiveDir)%(Filename)%(Extension)" />
