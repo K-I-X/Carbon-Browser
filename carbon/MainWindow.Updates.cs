@@ -25,10 +25,12 @@ public partial class MainWindow
   Environment.GetEnvironmentVariable("CARBON_QA_VERSION") is { } fake ? Version.Parse(fake) :
 #endif
   Assembly.GetEntryAssembly()?.GetName().Version ?? new Version(0, 0);
- /// Which build of this version this is: GitHub's run number (CarbonBuild), 0 for a build made by hand. A release labels its
- /// installer "Carbon build N", so a newer build of the same version reaches installed copies too.
+ /// Which build of this version this is: GitHub's run number (CarbonBuild), 0 for a build made by hand. A release says its
+ /// build in a hidden line of its notes (<!-- carbon-build: N -->), so a newer build of the same version reaches installed copies too.
  static int CurrentBuild => int.TryParse(Assembly.GetEntryAssembly()?.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "CarbonBuild")?.Value, out int b) ? b : 0;
- static int BuildOf(JsonElement release) => release.TryGetProperty("assets", out var assets) ? assets.EnumerateArray()
+ static int BuildOf(JsonElement release) =>
+  release.TryGetProperty("body", out var body) && body.GetString() is { } notes && System.Text.RegularExpressions.Regex.Match(notes, @"carbon-build:\s*(\d+)") is { Success: true } m && int.TryParse(m.Groups[1].Value, out int built) ? built
+  : release.TryGetProperty("assets", out var assets) ? assets.EnumerateArray() // older releases: the installer's label
   .Where(a => a.GetProperty("name").GetString() == "Carbon-Setup-x64.exe")
   .Select(a => a.TryGetProperty("label", out var l) && l.GetString() is { } label && label.StartsWith("Carbon build ", StringComparison.Ordinal) && int.TryParse(label[13..], out int n) ? n : 0)
   .FirstOrDefault() : 0;
