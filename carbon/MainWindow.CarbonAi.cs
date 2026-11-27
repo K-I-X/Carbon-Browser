@@ -7,13 +7,13 @@ public partial class MainWindow
  async Task PrepareCarbonAi()
  {
   var cli = CarbonAi.Adapter;
-  if (CarbonAi.Ready) { await LoadAiModels(cli); return; }
+  if (CarbonAi.Ready) { _ = CarbonAiServer.Ensure(); await LoadAiModels(cli); return; } // the server starts now, so the first message is quick
   aiStatus[cli.Id] = "installing"; aiSetupLine = ""; PublishAiEverywhere();
   bool ok = await CarbonAi.Install(() => Dispatcher.BeginInvoke(() => { aiSetupLine = CarbonAi.Progress; PublishAiEverywhere(); }));
   aiStatus.Remove(cli.Id); aiSetupLine = "";
   await CheckAi(cli);
   if (!ok) aiError = CarbonAi.Error;
-  else { aiError = ""; aiModels.Remove(cli.Id); await LoadAiModels(cli); await RunPending(); }
+  else { aiError = ""; _ = CarbonAiServer.Ensure(); aiModels.Remove(cli.Id); await LoadAiModels(cli); await RunPending(); }
   PublishAiEverywhere();
  }
 }

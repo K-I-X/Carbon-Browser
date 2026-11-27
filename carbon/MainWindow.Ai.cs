@@ -464,8 +464,6 @@ public partial class MainWindow
  static readonly HashSet<string> tierFailed = []; // "ai:mode" whose model wasn't on the user's plan: flagged in Settings
  static readonly Dictionary<string, string> onDefault = [];
  static readonly Dictionary<string, int> carbonTries = [];
- /// The first other AI that's set up and ready, to answer when Carbon AI can't.
- static AgentAdapter? StandIn() => AiClis.FirstOrDefault(c => c is not CarbonAiAdapter && aiStatus.GetValueOrDefault(c.Id) == "ready" && FindCli(c.Command) != null); // chat id: free models Carbon AI has tried for this message // chat id: its next run uses the AI's default model, with this note
  /// Claude Code's reply when the model isn't one the user can use (checked with 2.1.316). Other apps' wording isn't known yet.
  static bool NotOnPlan(string reply) => reply.StartsWith("There's an issue with the selected model", StringComparison.Ordinal);
  static string ModelName(string ai, string model) => aiModels.GetValueOrDefault(ai, []).FirstOrDefault(m => m.Id == model)?.Name ?? model;
@@ -1205,22 +1203,19 @@ public partial class MainWindow
   if (chat.Harness.Length == 0) chat.Harness = Companions.FirstOrDefault(c => c.Id == chat.Companion) is { Ai.Length: > 0 } own ? own.Ai : Prefs.AiHarness;
   if (chat.Harness.Length == 0) { aiPending = text; aiPendingChat = chat; return; } // asked before picking an AI: runs once it's set up
   var cli = AiClis.FirstOrDefault(c => c.Id == chat.Harness) ?? AiClis[0];
-  // Carbon AI not downloaded yet, or its free models out of reach from this network: another AI that's set up answers this
-  // message (the chat says so), so a message never just waits. With none, the chat shows the message and why.
-  if (cli is CarbonAiAdapter) {
-   string? why = CarbonAi.Ready ? await CarbonAi.Problem() : CarbonAi.Error.Length > 0 ? CarbonAi.Error.TrimEnd('.') : null;
-   if (!CarbonAi.Ready && aiStatus.GetValueOrDefault(cli.Id) != "installing") _ = PrepareCarbonAi();
-   if ((why != null || !CarbonAi.Ready) && !aiChecked) await CheckAis(); // which other AIs are set up, once
-   if ((why != null || !CarbonAi.Ready) && StandIn() is { } other) {
-    chat.Harness = other.Id; chat.Session = null; chat.Started = false;
-    onDefault[chat.Id] = why != null ? $"Carbon AI can't answer right now ({why}), so {other.Name} answered instead." : $"Carbon AI is still getting ready (a one-time download), so {other.Name} answered this one.";
-    cli = other;
-   } else if (why != null && CarbonAi.Ready) {
-    chat.Messages.Add(new() { Role = "user", Text = shown ?? text });
-    chat.Error = $"Carbon AI can't answer right now: {why}. Try again on another network, or set up another AI in Settings → Models.";
-    CarbonAi.Forget(); chat.Updated = DateTime.UtcNow; SaveAiChats(); PublishAiEverywhere();
-    return;
-   }
+  // A chat an earlier build of Carbon handed to another AI when Carbon AI couldn't answer goes back to Carbon AI: Carbon AI
+  // never hands a chat to another AI (that used the user's own plan, which may have run out).
+  if (cli is not CarbonAiAdapter && chat.Messages.FindLastIndex(m => m.Role == "note" && m.Text.StartsWith("Carbon AI", StringComparison.Ordinal)
+   && (m.Text.EndsWith("answered instead.", StringComparison.Ordinal) || m.Text.EndsWith("answered this one.", StringComparison.Ordinal))) is var handed and >= 0) {
+   chat.Messages[handed].Text += " This chat is back on Carbon AI."; // once: picking another AI for it later sticks
+   chat.Harness = CarbonAi.Id; chat.Session = null; chat.Started = false; cli = CarbonAi.Adapter;
+  }
+  // Carbon AI's free models out of reach from this network: the chat shows the message and why, instead of waiting.
+  if (cli is CarbonAiAdapter && CarbonAi.Ready && await CarbonAi.Problem() is { } why) {
+   chat.Messages.Add(new() { Role = "user", Text = shown ?? text });
+   chat.Error = $"Carbon AI can't answer right now: {why}. Try again on another network.";
+   CarbonAi.Forget(); chat.Updated = DateTime.UtcNow; SaveAiChats(); PublishAiEverywhere();
+   return;
   }
   if (FindCli(cli.Command) is not { } exe) {
    aiPending = shown ?? text; aiPendingChat = chat;
@@ -1364,19 +1359,8 @@ public partial class MainWindow
      return;
     }
     carbonTries.Remove(chat.Id); CarbonAi.Forget();
-    if (!aiChecked) await CheckAis();
-    // Three free models in a row didn't answer: another AI that's set up answers instead, or the chat says what went wrong.
-    if (StandIn() is { } other) {
-     int cut = shown.Length > 0 ? chat.Messages.FindLastIndex(m => m.Role == "user") : from;
-     if (cut >= 0) chat.Messages.RemoveRange(cut, chat.Messages.Count - cut);
-     chat.Harness = other.Id; chat.Session = null; chat.Started = false; chat.Error = "";
-     onDefault[chat.Id] = $"Carbon AI's free models didn't answer, so {other.Name} answered instead.";
-     runs.Remove(chat.Id); run.Dispose(); run = null;
-     me.Task.State = "interrupted";
-     await RunAi(chat, shown.Length > 0 ? shown : ResumeBrief(me.Task), shown: shown, asker: asker);
-     return;
-    }
-    chat.Error = "Carbon AI's free models didn't answer" + (said1.Length > 0 ? $" ({(said1.Length > 200 ? said1[..200] + "…" : said1)})" : "") + ". Try again in a minute, or set up another AI in Settings → Models.";
+    // Three free models in a row didn't answer: the chat says what went wrong (it never hands the chat to another AI).
+    chat.Error = "Carbon AI's free models didn't answer" + (said1.Length > 0 ? $" ({(said1.Length > 200 ? said1[..200] + "…" : said1)})" : "") + ". Try again in a minute.";
    }
    if (said) carbonTries.Remove(chat.Id);
    // Setup is done once the companion has answered the user in a regular chat that had it.

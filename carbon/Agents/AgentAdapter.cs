@@ -596,7 +596,7 @@ public sealed class CliRun : AgentRun
 
  public override void Dispose() { process.Dispose(); job.Dispose(); }
 
- sealed class Job : IDisposable
+ internal sealed class Job : IDisposable
  {
   [StructLayout(LayoutKind.Sequential)]
   struct Limits

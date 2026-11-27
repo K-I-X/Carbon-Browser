@@ -144,6 +144,16 @@ sealed class CarbonAiAdapter : OpenCodeAdapter
   foreach (var m in free) CarbonAi.Efforts[m.Id] = m.Efforts;
   return [new("", "Automatic (best free model)", []), .. free.Select(m => m with { Name = m.Name.Replace(" · opencode", "") + " · free" })];
  }
+ /// Through Carbon AI's server when it's running (fast, streamed); otherwise OpenCode once per message, as before.
+ public override async Task<AgentRun> Start(string exe, RunRequest r)
+ {
+  var args = await Args(exe, r); // writes the chat folder's settings (Carbon's tools) and picks the model
+  if (await CarbonAiServer.Ensure() != null) {
+   string Arg(string flag) => args.IndexOf(flag) is var i and >= 0 && i + 1 < args.Count ? args[i + 1] : "";
+   return ServerRun.Begin(this, r, Arg("-m") is { Length: > 0 } m ? m : CarbonAi.Best, Arg("--variant"));
+  }
+  return await base.Start(exe, r);
+ }
  /// Never anything but a free model: no model, one that isn't free or one that just failed runs on the best free one.
  /// With no effort picked, it thinks as little as the model allows, so replies come fast.
  public override async Task<List<string>> Args(string exe, RunRequest r)

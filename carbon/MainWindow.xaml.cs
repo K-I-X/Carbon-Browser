@@ -51,6 +51,7 @@ public partial class MainWindow : Window
   if(state.UiVersion<5){MigrateAgentIds(state.Preferences);state.UiVersion=5;}
   if(state.UiVersion<6){state.Welcome=true;DropUntouchedDefaults(state.Preferences);state.UiVersion=6;} // 1.9: everyone makes their own companion, once
   if(state.Preferences.AiHarness.Length==0)state.Preferences.AiHarness=CarbonAi.Id; // Carbon AI is free and ready: no setup before the first chat
+  if(state.Preferences.CarbonAiDefault<1){state.Preferences.AiHarness=CarbonAi.Id;state.Preferences.CarbonAiDefault=1;} // once: new chats start on Carbon AI again; picking another AI after this sticks
   MoveOldCrew(state.Preferences);
   foreach(var c in state.Preferences.Companions)Equip(c); // hired before the roles came with skills and knowledge files
   foreach(var c in state.Preferences.Companions)c.Look=Unmarked(c.Look); // Stage 17 took the markings out

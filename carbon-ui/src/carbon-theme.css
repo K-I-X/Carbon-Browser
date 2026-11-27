@@ -176,3 +176,7 @@ html[data-carbon] :is(.home-idea, .widget, .mate-card, .speed-dial-tile) { backg
 
 /* "Open links in Carbon" is a little longer than Still's words: room for it, so the row stays on one line as in Still */
 .get-started { max-width: min(680px, 92%); }
+
+/* Still made every toast click-through (so a toast over the tab strip never blocks it), which also made its Undo,
+   Resume all and Not now buttons impossible to press. The buttons take clicks again; the rest still lets clicks through. */
+[data-sonner-toast] :is([data-button], [data-cancel], button) { pointer-events: auto !important; }
