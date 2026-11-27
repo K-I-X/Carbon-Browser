@@ -6,32 +6,29 @@ using Microsoft.Web.WebView2.Core;
 namespace Carbon;
 public partial class MainWindow
 {
- static readonly string[] BlockedDomains = [
-  "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
-  "google-analytics.com", "googletagmanager.com", "adnxs.com", "adsrvr.org", "taboola.com",
-  "outbrain.com", "scorecardresearch.com", "quantserve.com", "criteo.com", "criteo.net",
-  "pubmatic.com", "rubiconproject.com", "openx.net", "casalemedia.com", "advertising.com",
-  "amazon-adsystem.com", "hotjar.com", "hotjar.io", "clarity.ms", "connect.facebook.net",
-  "analytics.tiktok.com", "ads.linkedin.com", "snap.licdn.com", "bat.bing.com", "ads.twitter.com",
-  "googletagservices.com", "pagead2.googlesyndication.com", "2mdn.net", "moatads.com", "adform.net",
-  "smartadserver.com", "3lift.com", "sharethrough.com", "media.net", "yieldmo.com", "teads.tv", "zemanta.com", "mgid.com",
-  "revcontent.com", "adcolony.com", "applovin.com", "unityads.unity3d.com", "ads.yahoo.com", "advertising.yahoo.com",
-  "adsafeprotected.com", "doubleverify.com", "chartbeat.com", "mixpanel.com", "segment.io", "fullstory.com", "newrelic.com"
- ];
  readonly Dictionary<string, List<string>> privateHidden = [];
+ // Ads and trackers (AdBlock.cs): every request a page makes is checked against the filter lists, except the page itself;
+ // a blocked one gets an empty 204. Element hiding (and YouTube's ad skipping) goes in as each page starts to load.
  void SetupBlocking(BrowserTab tab, CoreWebView2 core)
  {
-  foreach (string domain in BlockedDomains) {
-   core.AddWebResourceRequestedFilter("*://" + domain + "/*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
-   core.AddWebResourceRequestedFilter("*://*." + domain + "/*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
-  }
+  core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
+  core.NavigationStarting += (_, e) => tab.Navigating = e.Uri;
   core.WebResourceRequested += (_, e) => {
    if (!Prefs.Blocking || !Uri.TryCreate(tab.Url, UriKind.Absolute, out var page) || Prefs.UnblockedHosts.Contains(page.Host)) return;
-   if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var request) || request.Host == page.Host) return;
-   if (!BlockedDomains.Any(d => request.Host == d || request.Host.EndsWith("." + d, StringComparison.OrdinalIgnoreCase))) return;
+   if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var request) || request.Scheme is not ("http" or "https" or "ws" or "wss")) return;
+   if (e.ResourceContext == CoreWebView2WebResourceContext.Document && e.Request.Uri == tab.Navigating) return; // the page itself, never
+   if (!AdBlock.ShouldBlock(request, page, e.ResourceContext)) return;
    e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream([]), 204, "No Content", "Content-Type: text/plain");
    tab.Blocked++;
   };
+  async void Hide() {
+   try {
+    if (!Prefs.Blocking || !Uri.TryCreate(core.Source, UriKind.Absolute, out var at) || at.Scheme is not ("http" or "https") || Prefs.UnblockedHosts.Contains(at.Host)) return;
+    if (AdBlock.PageScript(at.Host) is { Length: > 0 } js) await core.ExecuteScriptAsync(js);
+   } catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException or ObjectDisposedException) { }
+  }
+  core.ContentLoading += (_, _) => Hide();
+  core.DOMContentLoaded += (_, _) => Hide();
  }
  async Task InstallHiddenRules(BrowserTab tab)
  {

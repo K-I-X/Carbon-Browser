@@ -38,6 +38,7 @@ public sealed class BrowserTab
  [JsonIgnore] public bool Media { get; set; } // played sound: memory saver leaves it alone so video/music never breaks
  [JsonIgnore] public bool Reader { get; set; }
  [JsonIgnore] public int Blocked { get; set; }
+ [JsonIgnore] public string Navigating { get; set; } = ""; // the address the tab itself is going to: never blocked
  [JsonIgnore] public string? HideScriptId { get; set; }
  [JsonIgnore] public string? UsbScriptId { get; set; } // hides USB, HID and serial from sites where they're blocked
  [JsonIgnore] public string InUse { get; set; } = ""; // what the page has on now: camera, mic, location (the Permissions button's dot)

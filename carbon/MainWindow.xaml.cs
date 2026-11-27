@@ -87,6 +87,7 @@ public partial class MainWindow : Window
    StartupMetrics.Mark("controllers-ready");
    await DrainExternalLinks();
    if (!secondary) StartUpdateChecks();
+   if (!secondary) _ = Task.Run(AdBlock.Update); // the filter lists: saved ones now, fresh ones every few days
    if (!secondary && !App.IsQa) _ = PrepareCarbonAi(); // Carbon AI downloads once, in the background, so the first chat needs no setup
    if (!secondary && HasPluginKey) _ = RefreshPlugins();
    if (!secondary && store.Recovered) Toast("Recovered your saved session. A backup is kept in your profile.");
