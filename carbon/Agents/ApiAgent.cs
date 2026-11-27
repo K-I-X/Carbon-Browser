@@ -27,6 +27,7 @@ public sealed class ApiProvider
  public int Context { get; set; }             // the models' context size in tokens; 0 = not known (Carbon assumes 128k and halves it if refused)
  public bool NoTools { get; set; }            // Test connection found the model doesn't call tools: it can chat, not use tabs
  public bool NoKey { get; set; }              // saved without a key: a local or open server that doesn't ask for one
+ [System.Text.Json.Serialization.JsonIgnore] public bool BuiltIn { get; set; } // Carbon AI (CarbonAi.cs): Carbon's own server, never saved in prefs
  public Dictionary<string, ApiUse> Spent { get; set; } = []; // "2026-11" → that month's use, and per job under "2026-11/titles"
  public static string Month => DateTime.Now.ToString("yyyy-MM");
  public double CostOf(long input, long output) => input / 1e6 * PriceIn + output / 1e6 * PriceOut;
@@ -74,7 +75,7 @@ public static class ApiKeyStore
 }
 
 /// An API provider as one of the AIs: picked, set per mode and run like the apps, with no app to install or sign in to.
-sealed class ApiAdapter : AgentAdapter
+class ApiAdapter : AgentAdapter
 {
  public required ApiProvider Provider { get; init; }
  public static ApiAdapter Of(ApiProvider p) => new() { Provider = p, Id = p.Id, Name = p.Name, App = p.Name, Command = "", Maker = p.Kind == "anthropic" ? "Anthropic-compatible API" : "OpenAI-compatible API" };
@@ -153,7 +154,8 @@ public sealed class ApiRun : AgentRun
 
  async Task Turn()
  {
-  string key = ApiKeyStore.Read(p.Id) ?? (p.NoKey ? "" : throw new ApiFailure("needs a key. Add one in Settings → Models."));
+  if (p.BuiltIn && !CarbonAi.Ready) throw new ApiFailure(CarbonAi.NotConnected);
+  string key = p.BuiltIn ? CarbonAi.Token : ApiKeyStore.Read(p.Id) ?? (p.NoKey ? "" : throw new ApiFailure("needs a key. Add one in Settings → Models."));
   var root = Address(p.Url) ?? throw new ApiFailure("its address must start with https:// (plain http only for localhost).");
   string model = r.Model.Length > 0 ? r.Model : p.Models.FirstOrDefault()?.Id ?? throw new ApiFailure("has no model. Add one in Settings → Models.");
   string file = Path.Combine(r.Folder, "api-" + (r.Session ?? "run") + ".json");
@@ -282,7 +284,10 @@ public sealed class ApiRun : AgentRun
    if (res.IsSuccessStatusCode) return res;
    string text = await res.Content.ReadAsStringAsync(stop.Token);
    var status = res.StatusCode; var wait = RetryAfter(res); res.Dispose();
-   if (status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) { ApiKeyStore.Refused.Add(p.Id); throw new ApiFailure("Key not accepted. Replace it in Settings → Models."); }
+   if (status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) {
+    if (p.BuiltIn) throw new ApiFailure($"couldn't answer: its server said {(int)status}. {Plain(Clip(text))}");
+    ApiKeyStore.Refused.Add(p.Id); throw new ApiFailure("Key not accepted. Replace it in Settings → Models.");
+   }
    if (status == HttpStatusCode.TooManyRequests) {
     var at = DateTime.Now + wait;
     if (tries == 2) throw new ApiFailure($"is still limiting requests. Try again after {at:t}.");

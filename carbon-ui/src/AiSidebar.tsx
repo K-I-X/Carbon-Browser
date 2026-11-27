@@ -232,7 +232,7 @@ export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: strin
   const setUp = s === "signedOut" || (s === "" && h.installed && !!ai.checked && !!h.terminalSignIn)
   const state = s === "installing" ? <><Spinner />{h.free ? h.progress || "Getting ready…" : "Installing…"}</>
    : s === "ready" && h.free ? <><span className="byo-ok">Free · No account needed</span><Check aria-hidden /></>
-   : s === "missing" && h.free ? "Free · Not downloaded yet"
+   : s === "missing" && h.free ? "Free · Not connected yet"
    : s === "ready" ? <><span className="byo-ok">{h.api ? (ai.apis?.providers.find(p => p.id === h.id)?.noKey ? "Compatible API, no key" : "Uses your API key") : h.billing ? "Ready" : "Logged in"}</span><Check aria-hidden /></>
    : s === "needsKey" ? "API provider · Needs a key"
    : s === "badKey" ? "API provider · Key not accepted"

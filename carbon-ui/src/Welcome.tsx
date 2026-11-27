@@ -87,7 +87,7 @@ function Connect({ ai, send }: { ai: AiState; send: Send }) {
   <div className="ob-connect" aria-live="polite" ref={card}>
    {!h ? <p className="ob-note">Pick the AI app you use.</p>
     : s === "installing" && h.free ? <div className="ob-status" role="status"><Spinner /><span><b>{h.progress || "Getting Carbon AI ready…"}</b><small>A one-time download. You can carry on with setup: anything you send waits for it.</small></span></div>
-    : s === "missing" && h.free ? <div className="ob-status is-ask"><span><b>Get Carbon AI</b><small>Carbon AI is free, with no account. It downloads once (about 80 MB) from npm.</small></span><Button size="sm" onClick={() => send("aiInstall")}>Get it</Button></div>
+    : s === "missing" && h.free ? <div className="ob-status is-ask"><span><b>Carbon AI isn't connected yet</b><small>This copy of Carbon was built without Carbon AI's server address. Pick another AI below for now.</small></span></div>
     : s === "installing" ? <div className="ob-status" role="status"><Spinner /><span><b>Installing {h.app}…</b><small>{ai.setup.line || "This usually takes about a minute."}</small></span>{cancel}</div>
     : s === "missing" ? <div className="ob-status is-ask"><span><b>Install {h.app}</b>
       {h.installer ? <small>{h.name} needs {h.maker}'s app, {h.app}. Carbon can install it for you with {h.maker}'s official installer from {host(h.installer)}. Or run this in {MAC ? "Terminal" : "PowerShell"} yourself: <code>{h.installCommand}</code></small>

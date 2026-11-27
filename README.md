@@ -17,7 +17,7 @@ Carbon isn't code-signed yet, so Windows SmartScreen may warn about an unknown p
 ## What's inside
 
 ### Carbon AI: free, and ready on the first start
-- **No plan, no account, no key.** Carbon AI runs on the free models OpenCode offers everyone. Carbon downloads OpenCode's program once in the background (checked against npm's checksum) and keeps it in its own folder.
+- **No plan, no account, no key, no limits to watch.** Carbon AI talks to Carbon's own server ([server/](server/README.md)), which holds the AI keys and switches between several free AI services (Gemini, Groq, Cerebras, Cloudflare Workers AI) so one running out doesn't stop it. Add a pay-as-you-go key to the server and it never runs out.
 - **Understands the page at once.** Every message comes with a quick look at the tab you're on: what you selected, the field your cursor is in, the headings and the text. Ask "what's this about?" or "answer question 3" and it already knows.
 - **Types for you.** Ask it to write something and it types it straight into the box or document you're in, including Google Docs, Gmail and forms.
 - **Makes and edits documents.** It opens a new Google Doc, Sheet, Slides or Form and fills it in, edits text in place, or hands you a real Word file (.docx) or web page.

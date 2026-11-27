@@ -463,7 +463,6 @@ public partial class MainWindow
  static readonly string[] Tiers = ["efficient", "default", "expert"];
  static readonly HashSet<string> tierFailed = []; // "ai:mode" whose model wasn't on the user's plan: flagged in Settings
  static readonly Dictionary<string, string> onDefault = [];
- static readonly Dictionary<string, int> carbonTries = [];
  /// Claude Code's reply when the model isn't one the user can use (checked with 2.1.316). Other apps' wording isn't known yet.
  static bool NotOnPlan(string reply) => reply.StartsWith("There's an issue with the selected model", StringComparison.Ordinal);
  static string ModelName(string ai, string model) => aiModels.GetValueOrDefault(ai, []).FirstOrDefault(m => m.Id == model)?.Name ?? model;
@@ -553,7 +552,7 @@ public partial class MainWindow
   skills = Skill.All.Select(k => new { id = k.Id, name = k.Name, description = k.Description, when = k.When, body = k.Body, stock = Skill.Stock.ContainsKey(k.Id), edited = k.Edited, source = k.Source, plugin = k.Plugin.Length > 0, only = k.Only.Length > 0 ? k.Only.Split(',') : [] }),
   model = Prefs.AiModels.GetValueOrDefault(on, ""), effort = Prefs.AiEfforts.GetValueOrDefault(on, ""),
   usage = aiUsage.GetValueOrDefault(on, ""), @checked = aiChecked, node = HasNode(),
-  harnesses = AiClis.Select(c => new { id = c.Id, name = c.Name, app = c.App, maker = c.Maker, installed = FindCli(c.Command) != null, status = aiStatus.GetValueOrDefault(c.Id, ""), installer = c.Installer, installCommand = c.InstallCommand, site = c.Site, secondary = c.Secondary, compatible = c.Compatible, forgets = c.Forgets, gaps = c.Gaps, terminalSignIn = c.TerminalSignIn, api = c is ApiAdapter, free = c is CarbonAiAdapter, progress = c is CarbonAiAdapter ? CarbonAi.Progress : "", billing = c.Billing }),
+  harnesses = AiClis.Select(c => new { id = c.Id, name = c.Name, app = c.App, maker = c.Maker, installed = FindCli(c.Command) != null, status = aiStatus.GetValueOrDefault(c.Id, ""), installer = c.Installer, installCommand = c.InstallCommand, site = c.Site, secondary = c.Secondary, compatible = c.Compatible, forgets = c.Forgets, gaps = c.Gaps, terminalSignIn = c.TerminalSignIn, api = c is ApiAdapter and not CarbonAiAdapter, free = c is CarbonAiAdapter, billing = c.Billing }),
   setup = new { line = aiSetupLine }, pending = aiPending.Length > 0,
   chatId = shown?.Id, chatHarness = shown?.Harness, chatCompanion = shown?.Companion, chatFolder = shown == null ? null : FolderOf(shown), nextFolder,
   messagesFrom = Math.Max(0, (shown?.Messages.Count ?? 0) - 300), // where the last 300 start: the interface keys its rows by it, so a long chat doesn't redraw every row on each step
@@ -1210,20 +1209,15 @@ public partial class MainWindow
    chat.Messages[handed].Text += " This chat is back on Carbon AI."; // once: picking another AI for it later sticks
    chat.Harness = CarbonAi.Id; chat.Session = null; chat.Started = false; cli = CarbonAi.Adapter;
   }
-  // Carbon AI's free models out of reach from this network: the chat shows the message and why, instead of waiting.
-  if (cli is CarbonAiAdapter && CarbonAi.Ready && await CarbonAi.Problem() is { } why) {
+  // Carbon AI without its server (a build made without its address): the chat shows the message and why.
+  if (cli is CarbonAiAdapter && !CarbonAi.Ready) {
    chat.Messages.Add(new() { Role = "user", Text = shown ?? text });
-   chat.Error = $"Carbon AI can't answer right now: {why}. Try again on another network.";
-   CarbonAi.Forget(); chat.Updated = DateTime.UtcNow; SaveAiChats(); PublishAiEverywhere();
+   chat.Error = CarbonAi.NotConnected; chat.Updated = DateTime.UtcNow; SaveAiChats(); PublishAiEverywhere();
    return;
   }
   if (FindCli(cli.Command) is not { } exe) {
    aiPending = shown ?? text; aiPendingChat = chat;
-   if (cli is CarbonAiAdapter) { // sent once it's ready; meanwhile the chat says why nothing has happened yet
-    if (aiStatus.GetValueOrDefault(cli.Id) != "installing") _ = PrepareCarbonAi();
-    Toast(CarbonAi.Error.Length > 0 ? CarbonAi.Error + " Carbon is trying again; your message goes once it's ready." : "Carbon AI is getting ready (a one-time download). Your message goes as soon as it's done.");
-   }
-   else aiStatus[cli.Id] = "missing";
+   aiStatus[cli.Id] = "missing";
    return;
   }
   if (runs.ContainsKey(chat.Id)) return;
@@ -1292,7 +1286,6 @@ public partial class MainWindow
   if (listed == null) model = effort = ""; else if (!listed.Efforts.Contains(effort)) effort = "";
   if (onDefault.Remove(chat.Id, out var planNote)) { model = effort = ""; chat.Messages.Insert(from, new() { Role = "note", Text = planNote }); from++; }
   AgentRun? run = null;
-  bool stalled = false; // Carbon AI: its free model said nothing for too long, so the run was stopped and another model answers
   try {
    if (cli.NamesSession) chat.Session ??= Guid.NewGuid().ToString();
    var request = new RunRequest(prompt, model, effort, folder, mcp, chat.Session, chat.Started && chat.Session != null) { Forget = chat.Ephemeral && cli.Forgets };
@@ -1300,23 +1293,14 @@ public partial class MainWindow
    run = me.Run = await cli.Start(exe, request);
    if (me.Stopped) run.Cancel();
    bool named = !kickoffs.Contains(chat.Id); // a kickoff (no message of the user's) is named from the companion's hello, once it's written
-   bool heard = false, begun = false;
-   var quiet = run; var since = DateTime.UtcNow;
-   // Carbon AI: nothing at all after 25 seconds (stuck before the model) or no words after 60, and the next free model answers.
-   using var watch = cli is CarbonAiAdapter ? new Timer(_ => {
-    var waited = DateTime.UtcNow - since;
-    if (!quiet.Cancelled && (!begun && waited > CarbonAi.Start || !heard && waited > CarbonAi.Patience)) { stalled = true; quiet.Cancel(); }
-   }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5)) : null;
    await foreach (var e in run.Events()) {
-    begun = true;
-    if (e is AgentEvent.Message or AgentEvent.ToolCall or AgentEvent.Thinking) heard = true;
     said |= ApplyEvent(chat, cli, e);
     if (!named && e is not AgentEvent.Message && chat.Messages.Find(m => m.Role == "assistant") is { } hello) { named = true; NameFromHello(chat, hello.Text); }
     if (e is AgentEvent.Message) PublishAiSoon(); else PublishAiEverywhere();
    }
    if (!named && chat.Messages.Find(m => m.Role == "assistant") is { } spoke) NameFromHello(chat, spoke.Text);
    chat.Started = chat.Session != null;
-   stopped = run.Cancelled && !run.TimedOut && !stalled;
+   stopped = run.Cancelled && !run.TimedOut;
    bool lost = run.Errors.Any(LostSession) || LostSession(chat.Error);
    if (lost && !said && !stopped && (cli.NamesSession || request.Resume)) {
     // The CLI has no record of this chat (stopped before it saved it, or from before chats had their own folders):
@@ -1341,28 +1325,6 @@ public partial class MainWindow
     await RunAi(chat, shown.Length > 0 ? shown : ResumeBrief(me.Task), shown: shown, asker: asker);
     return;
    }
-   // Carbon AI: a free model that failed or said nothing in time rests for a while, and the next free model answers the same
-   // message (up to three in a row). The chat says so in one line.
-   if (cli is CarbonAiAdapter && !said && !stopped && (stalled || run.ExitCode != 0 || chat.Error.Length > 0)) {
-    if (CarbonAi.Used(folder) is { } tired) CarbonAi.Failed(tired);
-    int tries = carbonTries.GetValueOrDefault(chat.Id) + 1;
-    string said1 = run.Errors.LastOrDefault(l => l.Trim().Length > 0)?.Trim() ?? "";
-    if (tries <= 2) {
-     carbonTries[chat.Id] = tries;
-     int cut = shown.Length > 0 ? chat.Messages.FindLastIndex(m => m.Role == "user") : from;
-     if (cut >= 0) chat.Messages.RemoveRange(cut, chat.Messages.Count - cut);
-     onDefault[chat.Id] = stalled ? "That free model was taking too long, so another free model is answering." : "That free model couldn't answer, so another free model is answering.";
-     chat.Session = null; chat.Started = false; chat.Error = "";
-     runs.Remove(chat.Id); run.Dispose(); run = null;
-     me.Task.State = "interrupted";
-     await RunAi(chat, shown.Length > 0 ? shown : ResumeBrief(me.Task), shown: shown, asker: asker);
-     return;
-    }
-    carbonTries.Remove(chat.Id); CarbonAi.Forget();
-    // Three free models in a row didn't answer: the chat says what went wrong (it never hands the chat to another AI).
-    chat.Error = "Carbon AI's free models didn't answer" + (said1.Length > 0 ? $" ({(said1.Length > 200 ? said1[..200] + "…" : said1)})" : "") + ". Try again in a minute.";
-   }
-   if (said) carbonTries.Remove(chat.Id);
    // Setup is done once the companion has answered the user in a regular chat that had it.
    if (said && regular && (setup || hadSetup) && who!.Setup == "pending") { who.Setup = "done"; who.SetupAt = DateTime.UtcNow; who.SetupVersion = CompanionMemory.Ver(setupSkill!.Body); SaveLater(); }
    if (run.TimedOut) chat.Error = $"Stopped: {cli.Name} reached the {AgentRun.Limit.TotalMinutes:0}-minute limit for one reply.";
@@ -1555,6 +1517,7 @@ public partial class MainWindow
  static async Task CheckAi(AgentAdapter cli)
  {
   if (aiStatus.GetValueOrDefault(cli.Id) == "installing") return;
+  if (cli is CarbonAiAdapter) { aiStatus[cli.Id] = CarbonAi.Ready ? "ready" : "missing"; return; }
   if (cli is ApiAdapter api) { aiStatus[cli.Id] = !ApiKeyStore.Has(api.Id) && !api.Provider.NoKey ? "needsKey" : ApiKeyStore.Refused.Contains(api.Id) ? "badKey" : "ready"; return; }
   if (FindCli(cli.Command) is not { } exe) { aiStatus[cli.Id] = "missing"; return; }
   try {
@@ -1592,7 +1555,7 @@ public partial class MainWindow
  /// Runs the maker's official installer, only after the user pressed Install. It installs for this Windows user, no admin.
  async Task AiInstall(AgentAdapter cli)
  {
-  if (cli is CarbonAiAdapter) { await PrepareCarbonAi(); return; }
+  if (cli is CarbonAiAdapter) return; // nothing to install: Carbon AI is Carbon's own server
   if (aiSetupProcess != null || cli.Installer.Length == 0) return; // some apps the user installs themselves
   aiStatus[cli.Id] = "installing"; aiSetupLine = aiError = ""; aiSetupCancelled = false; PublishAiEverywhere();
   Process? p = null;
