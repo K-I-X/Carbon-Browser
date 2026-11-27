@@ -191,9 +191,12 @@ public sealed class ApiRun : AgentRun
      model = next; step--; continue;
     }
     catch (ApiFailure f) when (f.Message == "model") {
-     if (p.Models.Count == 0 || model == p.Models[0].Id) throw new ApiFailure($"doesn't offer {model}. Pick another model in Settings → Models.");
-     Say(new AgentEvent.Note($"{model} isn't available at {p.Name}, so this ran on {p.Models[0].Id}. You can pick another in Settings → Models."));
-     model = p.Models[0].Id; step--; continue;
+     // A model the provider doesn't offer (any more): the next one it hasn't tried this turn, never back to one that failed.
+     tried.Add(model);
+     string? next = p.Models.Select(m => m.Id).FirstOrDefault(m => !tried.Contains(m));
+     if (next == null) throw new ApiFailure($"doesn't offer {model}. Pick another model in Settings → Models.");
+     Say(new AgentEvent.Note($"{model} isn't available at {p.Name}, so {next} is answering."));
+     model = next; step--; continue;
     }
     catch (ApiFailure f) when (f.Message == "context") {
      if (context <= 8000) throw new ApiFailure("this chat is too long for the model. Start a new chat.");
@@ -287,7 +290,10 @@ public sealed class ApiRun : AgentRun
   for (int tries = 0; ; tries++) {
    using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json") };
    Authorize(req, p.Kind, key);
-   var res = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, stop.Token);
+   HttpResponseMessage res;
+   // Gemini: no answer at all within 45 seconds means it's stuck; the next model tries (as for a busy one).
+   try { res = GeminiKey.Is(url) ? await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, stop.Token).WaitAsync(TimeSpan.FromSeconds(45), stop.Token) : await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, stop.Token); }
+   catch (TimeoutException) { throw new ApiFailure("busy"); }
    if (res.IsSuccessStatusCode) return res;
    string text = await res.Content.ReadAsStringAsync(stop.Token);
    var status = res.StatusCode; var wait = RetryAfter(res); res.Dispose();
@@ -319,10 +325,11 @@ public sealed class ApiRun : AgentRun
   return wait < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait > TimeSpan.FromMinutes(2) ? TimeSpan.FromMinutes(2) : wait;
  }
  /// Server-sent events: each data line's JSON, until [DONE] or the end.
+ TimeSpan quiet = TimeSpan.FromMinutes(5);
  async IAsyncEnumerable<JsonNode> Stream(HttpResponseMessage res)
  {
   using var reader = new StreamReader(await res.Content.ReadAsStreamAsync(stop.Token));
-  while (await reader.ReadLineAsync(stop.Token).AsTask().WaitAsync(TimeSpan.FromMinutes(5), stop.Token) is { } line) { // silent for 5 minutes ends it, as on the Mac
+  while (await reader.ReadLineAsync(stop.Token).AsTask().WaitAsync(quiet, stop.Token) is { } line) { // silent for 5 minutes ends it, as on the Mac (Gemini: 60 seconds)
    if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
    string data = line[5..].Trim();
    if (data == "[DONE]") yield break;
@@ -341,23 +348,28 @@ public sealed class ApiRun : AgentRun
    return (JsonNode)new JsonObject { ["type"] = "function", ["function"] = new JsonObject {
    ["name"] = t["name"]!.DeepClone(), ["description"] = t["description"]?.DeepClone() ?? "", ["parameters"] = gemini ? GeminiKey.Clean(schema) : schema } }; })]);
   if (r.Effort.Length > 0) body["reasoning_effort"] = r.Effort;
+  else if (gemini) body["reasoning_effort"] = "low"; // Gemini thinks before it answers: briefly, so replies come fast
+  quiet = gemini ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(5);
   using var res = await Post(At(root, "chat/completions"), key, body);
   var text = new StringBuilder(); var calls = new SortedDictionary<int, (string Id, string Name, StringBuilder Args)>(); long input = 0, output = 0;
-  await foreach (var e in Stream(res)) {
-   if (e["error"] is { } error) {
-    string said = error["message"]?.ToString() ?? error.ToJsonString();
-    if (text.Length == 0 && calls.Count == 0 && (said.Contains("overloaded", StringComparison.OrdinalIgnoreCase) || said.Contains("high demand", StringComparison.OrdinalIgnoreCase) || said.Contains("UNAVAILABLE", StringComparison.Ordinal))) throw new ApiFailure("busy");
-    throw new ApiFailure("answered: " + Plain(Clip(said)));
+  try {
+   await foreach (var e in Stream(res)) {
+    if (e["error"] is { } error) {
+     string said = error["message"]?.ToString() ?? error.ToJsonString();
+     if (text.Length == 0 && calls.Count == 0 && (said.Contains("overloaded", StringComparison.OrdinalIgnoreCase) || said.Contains("high demand", StringComparison.OrdinalIgnoreCase) || said.Contains("UNAVAILABLE", StringComparison.Ordinal))) throw new ApiFailure("busy");
+     throw new ApiFailure("answered: " + Plain(Clip(said)));
+    }
+    if (e["usage"] is JsonObject u) { input = u["prompt_tokens"]?.GetValue<long>() ?? input; output = u["completion_tokens"]?.GetValue<long>() ?? output; }
+    var delta = e["choices"] is JsonArray { Count: > 0 } choices ? choices[0]?["delta"] : null; // the usage chunk has none
+    if (delta?["content"]?.GetValue<string>() is { Length: > 0 } chunk) { Say(new AgentEvent.Message(chunk, text.Length > 0 ? "" : null)); text.Append(chunk); }
+    foreach (var tc in delta?["tool_calls"] as JsonArray ?? []) {
+     int i = tc?["index"]?.GetValue<int>() ?? 0;
+     var (id, name, args) = calls.GetValueOrDefault(i, ("", "", new StringBuilder()));
+     calls[i] = (tc?["id"]?.GetValue<string>() is { Length: > 0 } nid ? nid : id, name + (tc?["function"]?["name"]?.GetValue<string>() ?? ""), args.Append(tc?["function"]?["arguments"]?.GetValue<string>() ?? ""));
+    }
    }
-   if (e["usage"] is JsonObject u) { input = u["prompt_tokens"]?.GetValue<long>() ?? input; output = u["completion_tokens"]?.GetValue<long>() ?? output; }
-   var delta = e["choices"] is JsonArray { Count: > 0 } choices ? choices[0]?["delta"] : null; // the usage chunk has none
-   if (delta?["content"]?.GetValue<string>() is { Length: > 0 } chunk) { Say(new AgentEvent.Message(chunk, text.Length > 0 ? "" : null)); text.Append(chunk); }
-   foreach (var tc in delta?["tool_calls"] as JsonArray ?? []) {
-    int i = tc?["index"]?.GetValue<int>() ?? 0;
-    var (id, name, args) = calls.GetValueOrDefault(i, ("", "", new StringBuilder()));
-    calls[i] = (tc?["id"]?.GetValue<string>() is { Length: > 0 } nid ? nid : id, name + (tc?["function"]?["name"]?.GetValue<string>() ?? ""), args.Append(tc?["function"]?["arguments"]?.GetValue<string>() ?? ""));
-   }
-  }
+  } catch (TimeoutException) when (text.Length == 0 && calls.Count == 0) { throw new ApiFailure("busy"); } // silent before a word: another model tries
+
   var message = new JsonObject { ["role"] = "assistant", ["content"] = text.Length > 0 ? text.ToString() : null };
   var list = calls.Values.Select((c, i) => (Id: c.Id.Length > 0 ? c.Id : "call_" + i, c.Name, Args: ParseArgs(c.Args.ToString()))).ToList();
   if (list.Count > 0) message["tool_calls"] = new JsonArray([.. list.Select(c => (JsonNode)new JsonObject { ["id"] = c.Id, ["type"] = "function",
@@ -554,8 +566,9 @@ static class GeminiKey
  public const string KeyPage = "https://aistudio.google.com/apikey";
  public static readonly ApiProvider Provider = new() {
   Id = ProviderId, Kind = "openai", Name = "Gemini", Url = "https://generativelanguage.googleapis.com/v1beta/openai", Context = 1_000_000,
-  // First the newest Flash; when it's busy or out of today's free use, the stable Flash, then the Lite ones (each has its own free quota).
-  Models = [new ApiModel { Id = "gemini-flash-latest" }, new ApiModel { Id = "gemini-2.5-flash" }, new ApiModel { Id = "gemini-flash-lite-latest" }, new ApiModel { Id = "gemini-2.5-flash-lite" }],
+  // Google's "-latest" names, which it keeps pointing at current models: Flash, then Flash Lite, then Pro (each has its own
+  // free quota). A busy one, one out of today's free use, or one not offered moves on to the next.
+  Models = [new ApiModel { Id = "gemini-flash-latest" }, new ApiModel { Id = "gemini-flash-lite-latest" }, new ApiModel { Id = "gemini-pro-latest" }],
  };
  public static bool Is(Uri root) => root.Host == "generativelanguage.googleapis.com";
  static readonly HashSet<string> Words = ["type", "description", "properties", "required", "items", "enum", "format", "nullable", "minimum", "maximum", "anyOf"];
