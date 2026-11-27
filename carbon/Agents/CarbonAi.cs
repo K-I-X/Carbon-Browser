@@ -27,6 +27,9 @@ static class CarbonAi
  public static string Progress { get; private set; } = ""; // "Getting Carbon AI ready… 42%" while it downloads
  public static string Error { get; private set; } = "";
  public static bool Ready => File.Exists(Exe);
+ /// OpenCode's free models have a usage allowance (its server answers "Free usage exceeded"); it resets after a while.
+ public static bool FreeLimit(string text) => text.Contains("Free usage", StringComparison.OrdinalIgnoreCase) || text.Contains("FreeUsageLimit", StringComparison.OrdinalIgnoreCase) || text.Contains("subscribe to Go", StringComparison.OrdinalIgnoreCase);
+ public const string FreeLimitMessage = "Carbon AI's free use is used up for now (OpenCode's free models have a limit). It resets after a while: try again later.";
  /// How long a free model may stay silent (no words, no step) before the next one answers instead.
  public static readonly TimeSpan Patience = TimeSpan.FromSeconds(60);
  /// How long OpenCode may take to start talking to a model at all (a step starting); longer means it's stuck before the model.
@@ -162,6 +165,15 @@ sealed class CarbonAiAdapter : OpenCodeAdapter
   string effort = r.Effort.Length > 0 && model == r.Model ? r.Effort : CarbonAi.Quick(model);
   CarbonAi.Using(r.Folder, model);
   var args = await base.Args(exe, r with { Model = model, Effort = effort });
+  // The chat folder's settings, without what a chat never needs and what slows the first reply: file snapshots
+  // (OpenCode's undo for code edits, a git copy of the folder), sharing and update checks.
+  try {
+   string config = Path.Combine(r.Folder, "opencode.json");
+   if (JsonNode.Parse(await File.ReadAllTextAsync(config)) is JsonObject json) {
+    json["snapshot"] = false; json["share"] = "disabled"; json["autoupdate"] = false;
+    await File.WriteAllTextAsync(config, json.ToJsonString());
+   }
+  } catch (Exception e) when (e is IOException or System.Text.Json.JsonException or UnauthorizedAccessException) { Carbon.App.Log(e); }
   args.Add("--thinking"); // says when it's thinking, so the chat shows it working before the words come
   return args;
  }

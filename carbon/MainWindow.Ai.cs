@@ -1343,7 +1343,9 @@ public partial class MainWindow
    }
    // Carbon AI: a free model that failed or said nothing in time rests for a while, and the next free model answers the same
    // message (up to three in a row). The chat says so in one line.
-   if (cli is CarbonAiAdapter && !said && !stopped && (stalled || run.ExitCode != 0 || chat.Error.Length > 0)) {
+   // OpenCode's free allowance used up: no other free model will answer either, so the chat says so at once.
+   if (cli is CarbonAiAdapter && !said && !stopped && (CarbonAi.FreeLimit(chat.Error) || run.Errors.Any(CarbonAi.FreeLimit))) chat.Error = CarbonAi.FreeLimitMessage;
+   else if (cli is CarbonAiAdapter && !said && !stopped && (stalled || run.ExitCode != 0 || chat.Error.Length > 0)) {
     if (CarbonAi.Used(folder) is { } tired) CarbonAi.Failed(tired);
     int tries = carbonTries.GetValueOrDefault(chat.Id) + 1;
     string said1 = run.Errors.LastOrDefault(l => l.Trim().Length > 0)?.Trim() ?? "";

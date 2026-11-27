@@ -241,7 +241,11 @@ public sealed class ServerRun : AgentRun
     case "session.status": {
      string state = Str(p?["status"]?["type"]) ?? "";
      if (state is "busy" or "retry") busy = true;
-     if (state == "retry" && Str(p?["status"]?["message"]) is { Length: > 0 } why) Keep("retry: " + why);
+     if (state == "retry" && Str(p?["status"]?["message"]) is { Length: > 0 } why) {
+      Keep("retry: " + why);
+      // OpenCode's free allowance is used up: it would keep retrying for minutes, so the reply stops here and says so.
+      if (CarbonAi.FreeLimit(why)) { exit = 1; Say(new AgentEvent.Error(CarbonAi.FreeLimitMessage)); Cancel(); Cancelled = false; return; }
+     }
      if (state == "idle" && busy) return; // the reply is done
      break;
     }
