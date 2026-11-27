@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { CarbonMark } from "./CarbonMark"
 import { Archive, ArchiveRestore, ArrowDownUp, Blocks, BookOpen, Brain, ChevronDown, Copy, ExternalLink, Folder, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Settings2, SquarePen, Trash2, UserX, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,7 +27,7 @@ export const randomCompanion = (): Companion => ({ id: "", name: "", face: "", c
 export function HomeRail({ view, setView, profile, onSettings }: { view: HomeView; setView: (v: HomeView) => void; profile: string; onSettings: () => void }) {
  const item = (v: HomeView, label: string, Icon: typeof Users) => <button className="home-rail-item" aria-label={label} title={label} aria-current={view === v ? "page" : undefined} onClick={() => setView(v)}><Icon /></button>
  return <nav className="home-rail" aria-label="Home">
-  <span className="carbon-mark is-small" aria-hidden><i /><i /></span>
+  <CarbonMark className="is-small" />
   {item("home", "New chat", SquarePen)}
   {item("chats", "Chats", MessageSquare)}
   {item("skills", "Skills", BookOpen)}

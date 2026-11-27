@@ -186,3 +186,11 @@ html[data-carbon] :is(.home-idea, .widget, .mate-card, .speed-dial-tile) { backg
 .gemini-key p { margin: 0; color: var(--muted-foreground); } .gemini-key a { color: var(--foreground); text-decoration: underline; }
 .gemini-key input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--input); background: var(--background); color: var(--foreground); font: inherit; }
 .gemini-key small { color: var(--muted-foreground); }
+
+/* Carbon's mark (CarbonMark.tsx), where Still drew its two bars */
+.carbon-mark svg { display: block; width: 30px; height: 30px; }
+.carbon-mark.is-small svg { width: 18px; height: 18px; }
+.intro-mark .carbon-mark svg { width: 28px; height: 28px; }
+.carbon-mark.is-live path { transform-origin: 12px 12.5px; animation: carbon-turn 1.4s linear infinite; }
+@keyframes carbon-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .carbon-mark.is-live path { animation: none; } }

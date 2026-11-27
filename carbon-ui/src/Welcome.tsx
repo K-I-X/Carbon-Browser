@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { CarbonMark } from "./CarbonMark"
 import { AnimatePresence, motion, useReducedMotion, type TargetAndTransition, type Transition } from "motion/react"
 import { ArrowLeft, ArrowUp, Check, CornerDownLeft, Dices, Download, FileSearch, Globe2, Monitor, Moon, PanelLeft, Palette, Pencil, RotateCw, SkipForward, Sun, Undo2, UserPlus, Volume2, VolumeX, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -340,7 +341,7 @@ export function Welcome({ theme, talk, ai, noAi, sounds = true, soundsBlocked = 
 
  return <div className={cn("welcome ob", leaving && "is-leaving", introOn && "is-intro")} role="dialog" aria-modal="true" aria-label="Set up Carbon">
   <header className="ob-top">
-   <span className="carbon-mark is-small" aria-hidden><i /><i /></span>
+   <CarbonMark className="is-small" />
    {!again && <div className="ob-dots" role="progressbar" aria-valuemin={1} aria-valuemax={FLOW.length} aria-valuenow={step + 1} aria-label={`Step ${step + 1} of ${FLOW.length}`}>{FLOW.map((s, i) => <i key={s} className={cn(i === step && "is-on", i < step && "is-done")} />)}</div>}
    <button className="ob-sound" aria-pressed={!soundOn} aria-label="Mute" title={soundsBlocked || (soundOn ? "Mute" : "Unmute")} disabled={!!soundsBlocked} onClick={() => sound(!sounds)}>{soundOn ? <Volume2 /> : <VolumeX />}</button>
    <div className="ob-theme" role="radiogroup" aria-label="Theme">{THEMES.map(([k, Icon]) => <button key={k} role="radio" aria-checked={(theme ?? "System") === k} aria-label={k} title={k === "System" ? (MAC ? "Match your Mac" : "Match Windows") : k} onClick={() => send("preference", { key: "theme", value: k })}><Icon /></button>)}</div>

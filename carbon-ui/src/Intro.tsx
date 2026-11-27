@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react"
+import { CarbonMark } from "./CarbonMark"
 import { Volume2, VolumeX } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { Look } from "./look"
@@ -47,7 +48,7 @@ export function IntroLayer({ at, hue, reduced, sound, onSound, live, onStart, on
   <div className="intro-dark" />
   <i className="intro-glow" /><i className="intro-ring" />
   {!reduced && [0, 1, 2].map(i => <i key={i} className="intro-spark" style={{ "--n": i } as CSSProperties} />)}
-  <div className="intro-mark" aria-hidden><span className="carbon-mark"><i /><i /></span><b>{[..."Carbon"].map((ch, i) => <span key={i} style={{ "--n": i } as CSSProperties}>{ch}</span>)}</b></div>
+  <div className="intro-mark" aria-hidden><CarbonMark /><b>{[..."Carbon"].map((ch, i) => <span key={i} style={{ "--n": i } as CSSProperties}>{ch}</span>)}</b></div>
   <button className="intro-sound" aria-pressed={!sound} aria-label="Mute" title={sound ? "Mute" : "Unmute"} onClick={e => { e.stopPropagation(); if (sound) audio.current?.stop(.2); onSound(!sound) }}>{sound ? <Volume2 /> : <VolumeX />}</button>
   <button className="intro-skip" autoFocus onClick={e => { e.stopPropagation(); end(true) }}>Skip <kbd>Space</kbd></button>
  </div>

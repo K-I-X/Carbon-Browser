@@ -1,4 +1,5 @@
 import { createElement, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent as PasteEvent, type CSSProperties, type ReactElement, type ReactNode } from "react"
+import { CarbonMark } from "./CarbonMark"
 import { ArrowDownRight, ArrowLeft, ArrowRight, ArrowUp, ArrowUpRight, Ban, BookOpen, Paperclip, Brain, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheck, ClipboardPaste, Coffee, Copy, Eye, FileText, Gauge, Globe, History, Keyboard, Lightbulb, ListTodo, LockKeyhole, Luggage, MousePointer2, MoveVertical, Pencil, Plus, Rabbit, RotateCcw, Save, Search, Tag, Maximize2, MessageSquarePlus, Settings2, ShieldCheck, SlidersHorizontal, Square, X, Scale, Zap, type LucideIcon, Download, Ellipsis, RefreshCw, Share, Trash2, FolderOpen, FolderX, Pause, Play } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -1127,7 +1128,7 @@ export function ChatView({ ai, send, mode, tabs = [], activeTab, onSettings, onF
    })}
    {busy && !ai.question && <div className={turn(items.length)}>{face(items.length)}<div className="ai-live">
     {thinking && <div className="ai-work-row is-live"><StepIcon step={now} /><span className="ai-step-text">{now}</span></div>}
-    <p className="ai-timer"><span className="carbon-mark is-small is-live" aria-hidden><i /><i /></span>Working for {clock(tick)}</p></div></div>}
+    <p className="ai-timer"><CarbonMark className="is-small" live />Working for {clock(tick)}</p></div></div>}
   </div></div>}
   {!busy && ai.chatId && ai.task?.state === "interrupted" && <Alert className="task-bar"><AlertDescription>{ai.task.unsure
     ? `Stopped: Carbon closed while ${name} was mid-task, and one step may not have finished. ${name} checks it first and asks you again.`
