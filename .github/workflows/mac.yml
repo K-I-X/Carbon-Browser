@@ -3,7 +3,7 @@ name: Mac
 on:
   push:
     branches: [main]
-    paths: ["mac/**", "carbon/Shell/**", "carbon/Assets/**", "carbon/MainWindow.Actions.cs", "carbon/MainWindow.Agents.cs", "carbon/MainWindow.Lookup.cs", "carbon/MainWindow.Drafts.cs", "carbon/Carbon.csproj", ".github/workflows/mac.yml"]
+    paths: ["mac/**", "carbon/Shell/**", "carbon/Assets/**", "carbon/MainWindow.Actions.cs", "carbon/AdBlock.cs", "carbon/MainWindow.Agents.cs", "carbon/MainWindow.Lookup.cs", "carbon/MainWindow.Drafts.cs", "carbon/Carbon.csproj", ".github/workflows/mac.yml"]
   release:
     types: [published]
   workflow_dispatch:

@@ -43,7 +43,7 @@ extract() {
  awk -v start="const string $2 = \"\"\"" 'index($0, start) {on=1; next} on && /^ *""";/ {exit} on' "$repo/carbon/$1" > "$resources/$3"
  test -s "$resources/$3"
 }
-awk '/BlockedDomains = \[/ {on=1; next} on && /^ *\];/ {exit} on' "$repo/carbon/MainWindow.Actions.cs" | grep -o '"[^"]*"' | tr -d '"' > "$resources/blocked.txt"
+awk '/BuiltInDomains = \[/ {on=1; next} on && /^ *\];/ {exit} on' "$repo/carbon/AdBlock.cs" | grep -o '"[^"]*"' | tr -d '"' > "$resources/blocked.txt"
 test -s "$resources/blocked.txt"
 for name in Page Snapshot Find Click Watch Mark Seen Same Focus Scroll Wait Sensitive FileInput Cursor Mask Sig; do extract MainWindow.Agents.cs "${name}Js" "agent-$name.js"; done
 for name in Results Readable; do extract MainWindow.Lookup.cs "${name}Js" "lookup-$name.js"; done
