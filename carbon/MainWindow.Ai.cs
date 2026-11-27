@@ -932,7 +932,7 @@ public partial class MainWindow
   - Answer in concise Markdown: short paragraphs, bullet lists, **bold** for key facts, a table when comparing things.
   - Don't end a reply by asking whether the user wants more ("Want me to…?"). To offer what could come next, end with up to three lines that start with `>> `, each a short message the user could send next (like `>> Compare the two cheapest`), with no question before them: Carbon shows them as buttons. When you need an answer before you can go on, end your reply with one choices block and nothing after it instead. type is single (pick one), multiple (pick several, then Submit) or dropdown (a long list); "other": true adds a box to type their own answer. Options are short plain text, at most 8 (20 in a dropdown). Carbon shows it as buttons and sends their pick back as their reply. For example:
   {ChoicesExample}
-  """ + KnowHow + (plugins ? PluginInstructions(who) : "") + RoleSetup(who);
+  """ + (sharedState?.Preferences.FastMode == true ? "" : KnowHow) + (plugins ? PluginInstructions(who) : "") + RoleSetup(who);
 
  /// Carbon's know-how for any site: understanding what's on screen at once, typing for the user, documents, schoolwork,
  /// and what to do on the sites people use most. Every AI gets it; it costs about 900 tokens once per chat.
@@ -1077,7 +1077,7 @@ public partial class MainWindow
  /// Private tabs, tabs the chat stays out of and Carbon's own pages send nothing; a page that doesn't answer in 0.4 s is skipped.
  async Task<string> Glance(AiChat chat)
  {
-  if (chat.Ephemeral || active is not { Private: false } tab || tab.View?.CoreWebView2 is not { } core || !tab.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return "";
+  if (Prefs.FastMode || chat.Ephemeral || active is not { Private: false } tab || tab.View?.CoreWebView2 is not { } core || !tab.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return "";
   if (chat is { Profile: CompanionProfile } && tab.ChatId == null && tab.Engine != CompanionEngine && (tab.InChat ?? tab.RunChat) != chat.Id) return "";
   try {
    string raw = await core.ExecuteScriptAsync(GlanceJs).WaitAsync(TimeSpan.FromMilliseconds(150));
@@ -1282,7 +1282,8 @@ public partial class MainWindow
   if (App.IsQa) mcp.Insert(1, "--qa");
   if (chat.Ephemeral) mcp.Add("--no-plugins"); // connected apps are off in incognito windows
   bool said = false, stopped = false;
-  var (model, effort) = Prefs.AiAdvanced ? (Prefs.AiModels.GetValueOrDefault(cli.Id, ""), Prefs.AiEfforts.GetValueOrDefault(cli.Id, "")) : ForMode(cli.Id, who?.Mode);
+  // Fast mode: each AI's quick model and low effort, unless the user picked a model by hand (Advanced).
+  var (model, effort) = Prefs.AiAdvanced ? (Prefs.AiModels.GetValueOrDefault(cli.Id, ""), Prefs.AiEfforts.GetValueOrDefault(cli.Id, "")) : ForMode(cli.Id, Prefs.FastMode ? "efficient" : who?.Mode);
   // Only the adapter's own catalog values reach the command line (cmd.exe and TOML quoting).
   var listed = aiModels.GetValueOrDefault(cli.Id, []).FirstOrDefault(m => m.Id == model);
   if (listed == null) model = effort = ""; else if (!listed.Efforts.Contains(effort)) effort = "";
@@ -1503,7 +1504,7 @@ public partial class MainWindow
  /// first message as its title.
  async Task NameChat(AiChat chat, string first)
  {
-  if (Prefs.ChatTitles == "off" || chat.NoMemory) return;
+  if (Prefs.ChatTitles == "off" || Prefs.FastMode || chat.NoMemory) return; // Fast mode: the title is the first words, so the AI only answers
   var was = chat.Title; // renamed meanwhile: the user's name stays
   if (App.IsQa && Prefs.ChatTitles == "" && Environment.GetEnvironmentVariable("CARBON_QA_TITLES") == null) return; // tests' fake AIs answer anything: only the tests about titles ask for them
   var pick = Prefs.ChatTitles.Split('/', 2);

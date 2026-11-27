@@ -92,6 +92,7 @@ public sealed class Preferences
  public bool OfferPasswordUpdate { get; set; } = true;
  public List<string> NeverSavePasswords { get; set; } = []; // origins where you said Never
  public bool Blocking { get; set; } = true;
+ public bool FastMode { get; set; } = true; // replies first: each AI's quick model and low effort (unless picked by hand), no tips or page look, no AI-made chat titles
  public int CarbonAiDefault { get; set; } // 1: Carbon AI was made the AI for new chats again, once (an earlier build could leave Claude there)
  public OfflineGame OfflineGame { get; set; } = new(); // Signal Run, the offline page's game (ErrorPages.cs)
  public string Tracking { get; set; } = "Balanced";
