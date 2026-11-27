@@ -29,7 +29,7 @@ import { ApiForm, PRESETS as API_PRESETS, type ApiState } from "./ApiProviders"
 import { MessageText, caretAt, dress, html, live, markup, mentions, read, shareable, textOf, units, type Known, type Mention, type Part } from "./Mention"
 import { adopt, appliers, caretIn, keepDraft, readDraft, rekey, sending, useDraft } from "./drafts"
 
-type Harness = { id: string; name: string; app: string; maker: string; installed: boolean; status: string; installer: string; installCommand: string; site: string; secondary?: boolean; compatible?: boolean; forgets?: boolean; gaps?: string[]; terminalSignIn?: string; api?: boolean; billing?: string }
+type Harness = { id: string; name: string; app: string; maker: string; installed: boolean; status: string; installer: string; installCommand: string; site: string; secondary?: boolean; compatible?: boolean; forgets?: boolean; gaps?: string[]; terminalSignIn?: string; api?: boolean; billing?: string; free?: boolean; progress?: string }
 type ChatRow = { id: string; title: string; harness: string; updated: string; companion?: string; from?: string | null; unread?: boolean; archived?: boolean; noMemory?: boolean; profile?: string }
 /// A chat by id: a saved one, or one of this incognito window's own.
 export const chatOf = (ai: AiState | undefined, id?: string | null) => id ? ai?.chats.find(c => c.id === id) ?? ai?.privateChats?.find(c => c.id === id) : undefined
@@ -110,7 +110,7 @@ const statusOf = (h?: Harness) => !h ? "" : h.status || (h.installed ? "" : "mis
 const ready = (h: Harness) => h.installed && !["missing", "signedOut", "needsKey", "badKey"].includes(statusOf(h))
 // Claude, ChatGPT, Grok and Gemini always show, with the API providers the user added. Every other agent, and adding an
 // API, waits under More agents, except the one in use, which stays in view.
-const MAIN = ["claude", "chatgpt", "grok", "gemini"]
+const MAIN = ["carbonai", "claude", "chatgpt", "grok", "gemini"]
 const isMain = (h: Harness) => MAIN.includes(h.id) || !!h.api
 export const logoOf = (h: Harness) => h.api ? h.name : h.id
 /// Every Model settings link and button opens Settings, Models.
@@ -230,7 +230,9 @@ export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: strin
   const s = statusOf(h), chosen = ai.harness === h.id, open = howTo === h.id
   // Signed out, or installed with no way to tell (GitHub Copilot) and signed in from a terminal.
   const setUp = s === "signedOut" || (s === "" && h.installed && !!ai.checked && !!h.terminalSignIn)
-  const state = s === "installing" ? <><Spinner />Installing…</>
+  const state = s === "installing" ? <><Spinner />{h.free ? h.progress || "Getting ready…" : "Installing…"}</>
+   : s === "ready" && h.free ? <><span className="byo-ok">Free · No account needed</span><Check aria-hidden /></>
+   : s === "missing" && h.free ? "Free · Not downloaded yet"
    : s === "ready" ? <><span className="byo-ok">{h.api ? (ai.apis?.providers.find(p => p.id === h.id)?.noKey ? "Compatible API, no key" : "Uses your API key") : h.billing ? "Ready" : "Logged in"}</span><Check aria-hidden /></>
    : s === "needsKey" ? "API provider · Needs a key"
    : s === "badKey" ? "API provider · Key not accepted"
@@ -239,7 +241,7 @@ export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: strin
   return <div key={h.id} className="byo-row" data-chosen={chosen || undefined} data-status={s || undefined}>
    <button className="byo-main" onClick={() => onPick(h.id)} aria-pressed={chosen}>
     <span className="byo-tile" aria-hidden><AiLogo id={h.api ? h.name : h.id} size={22} /></span>
-    <span className="byo-name"><strong>{h.name}{h.compatible && <> <Badge variant="outline" className="byo-tag" title="Built from its docs, not yet tested with the real app">Compatible</Badge></>}</strong><small>{state}</small></span>
+    <span className="byo-name"><strong>{h.name}{h.free && <> <Badge className="byo-tag byo-free">Free</Badge></>}{h.compatible && <> <Badge variant="outline" className="byo-tag" title="Built from its docs, not yet tested with the real app">Compatible</Badge></>}</strong><small>{state}</small></span>
     {chosen && <Check className="ai-pick-check" aria-label="Chosen" />}
    </button>
    {setUp && send && <Button size="sm" variant="outline" className="byo-act" aria-expanded={open} onClick={() => toggle(h.id)}>Set up<ChevronDown /></Button>}

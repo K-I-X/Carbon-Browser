@@ -1322,7 +1322,7 @@ public partial class MainWindow
     if (Incognito(who)) return Fail(KeepsNothing);
     string name = string.Concat(Path.GetFileName(S(args, "name").Trim()).Split(Path.GetInvalidFileNameChars())).Trim(), content = S(args, "content");
     string ext = Path.GetExtension(name).ToLowerInvariant();
-    if (ext is not (".csv" or ".tsv" or ".md" or ".json" or ".txt") || name.Length is < 5 or > 120) return Fail("Name the file with a .csv, .md, .json or .txt ending, like laptops.csv.");
+    if (ext is not (".csv" or ".tsv" or ".md" or ".json" or ".txt" or ".docx" or ".html") || name.Length is < 5 or > 120) return Fail("Name the file with a .docx, .html, .csv, .md, .json or .txt ending, like essay.docx or laptops.csv.");
     if (content.Length > 5_000_000) return Fail("That's too big: keep a file under 5 MB.");
     var run = runs.GetValueOrDefault(who);
     string folder = Path.Combine(LibraryFolder, run?.Chat.Id ?? string.Concat(who.Split(Path.GetInvalidFileNameChars())));
@@ -1330,7 +1330,10 @@ public partial class MainWindow
     string file = Path.Combine(folder, name); string Rel() => Path.GetRelativePath(LibraryFolder, file).Replace('\\', '/');
     bool again = run?.Chat.Messages.Any(m => m.Role == "file" && m.Text == Rel()) == true; // this chat saved it before: a fix replaces it
     if (!again) for (int n = 2; File.Exists(file); n++) file = Path.Combine(folder, Path.GetFileNameWithoutExtension(name) + $" ({n})" + ext);
-    await File.WriteAllTextAsync(file, content, new UTF8Encoding(ext == ".csv")); // a BOM lets Excel read a CSV's accents
+    string title = Path.GetFileNameWithoutExtension(name);
+    if (ext == ".docx") await File.WriteAllBytesAsync(file, DocMaker.Docx(content, title)); // Markdown in, a Word document out
+    else if (ext == ".html") await File.WriteAllTextAsync(file, DocMaker.Html(content, title), new UTF8Encoding(false));
+    else await File.WriteAllTextAsync(file, content, new UTF8Encoding(ext == ".csv")); // a BOM lets Excel read a CSV's accents
     library = null;
     if (!again) run?.Chat.Messages.Add(new() { Role = "file", Text = Rel() });
     Did(who, (again ? "Updated " : "Saved ") + Path.GetFileName(file)); PublishAiEverywhere();

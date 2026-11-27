@@ -50,6 +50,7 @@ public partial class MainWindow : Window
   if(state.UiVersion<4){state.Preferences.OfferPasswordSave=state.Preferences.OfferPasswordUpdate=true;state.UiVersion=4;} // offering to save logins is on by default, like other browsers
   if(state.UiVersion<5){MigrateAgentIds(state.Preferences);state.UiVersion=5;}
   if(state.UiVersion<6){state.Welcome=true;DropUntouchedDefaults(state.Preferences);state.UiVersion=6;} // 1.9: everyone makes their own companion, once
+  if(state.Preferences.AiHarness.Length==0)state.Preferences.AiHarness=CarbonAi.Id; // Carbon AI is free and ready: no setup before the first chat
   MoveOldCrew(state.Preferences);
   foreach(var c in state.Preferences.Companions)Equip(c); // hired before the roles came with skills and knowledge files
   foreach(var c in state.Preferences.Companions)c.Look=Unmarked(c.Look); // Stage 17 took the markings out
@@ -86,6 +87,7 @@ public partial class MainWindow : Window
    StartupMetrics.Mark("controllers-ready");
    await DrainExternalLinks();
    if (!secondary) StartUpdateChecks();
+   if (!secondary && !App.IsQa) _ = PrepareCarbonAi(); // Carbon AI downloads once, in the background, so the first chat needs no setup
    if (!secondary && HasPluginKey) _ = RefreshPlugins();
    if (!secondary && store.Recovered) Toast("Recovered your saved session. A backup is kept in your profile.");
 #if CARBON_QA

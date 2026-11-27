@@ -79,7 +79,7 @@ public abstract class AgentAdapter
  protected async Task<string[]?> Printed(string exe, string folder, params string[] args)
  {
   Directory.CreateDirectory(folder);
-  var start = Launch(exe, folder, args, keep: Kept);
+  var start = Launch(exe, folder, args, Env, Kept);
   start.RedirectStandardInput = start.RedirectStandardOutput = start.RedirectStandardError = true;
   start.StandardOutputEncoding = start.StandardErrorEncoding = new UTF8Encoding(false);
   using var p = Process.Start(start)!;
@@ -247,7 +247,7 @@ sealed class GeminiAdapter : AgentAdapter
 
 /// OpenCode, on whichever provider the user set up inside it: a plan sign-in, that provider's key kept by OpenCode, or
 /// OpenCode's free models. Carbon never sees which. Its own tools, skills and sub-agents stay off.
-sealed partial class OpenCodeAdapter : AgentAdapter
+partial class OpenCodeAdapter : AgentAdapter
 {
  string version = "";
  public override string[] Gaps => ["Runs on the provider you set up in OpenCode (opencode providers login, in a terminal).",

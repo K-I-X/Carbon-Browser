@@ -86,6 +86,8 @@ function Connect({ ai, send }: { ai: AiState; send: Send }) {
   <AiPicker ai={ai} onPick={id => send("aiHarness", { harness: id })} />
   <div className="ob-connect" aria-live="polite" ref={card}>
    {!h ? <p className="ob-note">Pick the AI app you use.</p>
+    : s === "installing" && h.free ? <div className="ob-status" role="status"><Spinner /><span><b>{h.progress || "Getting Carbon AI ready…"}</b><small>A one-time download. You can carry on with setup: anything you send waits for it.</small></span></div>
+    : s === "missing" && h.free ? <div className="ob-status is-ask"><span><b>Get Carbon AI</b><small>Carbon AI is free, with no account. It downloads once (about 80 MB) from npm.</small></span><Button size="sm" onClick={() => send("aiInstall")}>Get it</Button></div>
     : s === "installing" ? <div className="ob-status" role="status"><Spinner /><span><b>Installing {h.app}…</b><small>{ai.setup.line || "This usually takes about a minute."}</small></span>{cancel}</div>
     : s === "missing" ? <div className="ob-status is-ask"><span><b>Install {h.app}</b>
       {h.installer ? <small>{h.name} needs {h.maker}'s app, {h.app}. Carbon can install it for you with {h.maker}'s official installer from {host(h.installer)}. Or run this in {MAC ? "Terminal" : "PowerShell"} yourself: <code>{h.installCommand}</code></small>
@@ -93,6 +95,7 @@ function Connect({ ai, send }: { ai: AiState; send: Send }) {
       {h.installer ? <Button size="sm" onClick={() => send("aiInstall")}>Install it</Button> : <Button size="sm" variant="outline" onClick={() => send("aiCheck")}>Check again</Button>}</div>
     : s === "signedOut" ? <div className="ob-status is-ask ob-signin"><SignInSteps h={h} send={send} /></div>
     : s === "needsKey" || s === "badKey" ? <p className="ob-note">{h.name} uses an API key. Add it in Settings, under Models, after setup, or pick an app you're signed in to.</p>
+    : h.free ? <p className="ob-ready"><Check />Carbon AI is ready. It's free, with no account, no key and nothing to sign in to.</p>
     : h.billing ? <p className="ob-ready"><Check />{h.name} is ready. {h.billing}</p>
     : <p className="ob-ready"><Check />{h.name} is ready, {h.api ? (ai.apis?.providers.find(p => p.id === h.id)?.noKey ? "with no key needed" : "with your API key") : "signed in"}.</p>}
    {ai.error && <div className="ob-status is-error" role="alert"><span><small>{ai.error}</small></span><Button size="sm" variant="outline" onClick={() => send(s === "missing" && h?.installer ? "aiInstall" : "aiCheck")}><RotateCw />Retry</Button></div>}
