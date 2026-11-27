@@ -932,7 +932,18 @@ public partial class MainWindow
   - Answer in concise Markdown: short paragraphs, bullet lists, **bold** for key facts, a table when comparing things.
   - Don't end a reply by asking whether the user wants more ("Want me to…?"). To offer what could come next, end with up to three lines that start with `>> `, each a short message the user could send next (like `>> Compare the two cheapest`), with no question before them: Carbon shows them as buttons. When you need an answer before you can go on, end your reply with one choices block and nothing after it instead. type is single (pick one), multiple (pick several, then Submit) or dropdown (a long list); "other": true adds a box to type their own answer. Options are short plain text, at most 8 (20 in a dropdown). Carbon shows it as buttons and sends their pick back as their reply. For example:
   {ChoicesExample}
-  """ + (sharedState?.Preferences.FastMode == true ? "" : KnowHow) + (plugins ? PluginInstructions(who) : "") + RoleSetup(who);
+  """ + Steps + (sharedState?.Preferences.FastMode == true ? "" : KnowHow) + (plugins ? PluginInstructions(who) : "") + RoleSetup(who);
+
+ /// How to carry out a task with steps, on any site, in Fast mode too: every step, in order, on whatever the site is.
+ const string Steps = """
+
+  Doing tasks with steps (assignments, instructions, tutorials, anything the page lists):
+  - Read the whole task first, every numbered step, link and attachment, and make a short checklist. Then do every step in order yourself, all the way to the end. Never stop after the first step, and never just explain how to do a step you can do.
+  - Open each link the task gives (open_tab) and do the work there, whatever the site is: documents, quizzes, design tools, 3D or VR builders, games, coding sites. If you don't know the site, look at it (read_page, and a screenshot when it draws its own interface), find its main buttons, and learn it as you go, like a person trying it for the first time. A site's own help or tutorial page is fine to read.
+  - Sites that draw in a canvas (3D galleries like Menel, Canva, drawing apps, maps, games): take a screenshot, then click_at, drag and scroll at x and y in that picture; drag pictures onto walls or slots, right-drag or drag to turn the view, hold W/A/S/D or the arrows with press_key holdMs to walk. Take a screenshot after each few actions to check it worked.
+  - When a step needs something only the user has (signing in, their own photo or file, a choice only they can make), ask_user for it, then carry on with the rest.
+  - After the last step, check each one is done, and end with the checklist: what you did, with links (like the Doc or the gallery's share link), and anything left for the user, like Turn in.
+  """;
 
  /// Carbon's know-how for any site: understanding what's on screen at once, typing for the user, documents, schoolwork,
  /// and what to do on the sites people use most. Every AI gets it; it costs about 900 tokens once per chat.
@@ -942,6 +953,7 @@ public partial class MainWindow
   - Understand first, fast: the [Carbon] note's quick look shows the page, the selection and the field the cursor is in. Work out what the user is looking at and what they most likely want from that, and start right away. Don't ask what they mean when the page makes it clear.
   - Typing for the user: when they ask you to write, answer, fill in, reply or type something and a text field or document is open, type it there (type with no id types into the focused field; click the field first if needed) instead of only showing it in the chat. Then say in one line what you typed and where. Show the text in the chat only when there's nowhere to put it or they asked to see it first.
   - Documents: to make a new document, open https://docs.new (Google Docs), https://sheets.new, https://slides.new or https://forms.new, and type the content in. In Google Docs click into the page body first, then type; use press_key for Enter, Control+B (bold), Control+Alt+1/2 (headings) and Control+Shift+8 (bullets). To edit a document, find the text, select it (click, then Shift+arrow keys or a double click) and type the new text over it. To give the user a file instead, save_file makes .docx (Word), .html, .md, .csv, .json or .txt from Markdown or text.
+  - Making things on creative sites (Menel and other VR or 3D gallery makers, Canva, Padlet, Book Creator, Wix, Google Sites, Scratch, Tinkercad): start a new project, pick a template or room, add and place the content the assignment asks for (pictures, titles, descriptions, artist names), name it, save or publish it, and copy the share link to hand in. For artwork you don't have, search for images the site offers, or ones the user can use, and say where each came from.
   - Schoolwork: help fully. Explain step by step, solve problems and show the work, write and edit essays, answers and summaries in the student's grade level and voice, and fill in worksheets and Docs when asked. In Google Classroom, assignments are under To-do and Classwork; open one, read its instructions and attached files (Docs open in a tab), do the work in the attached Doc or form, and leave the final Turn in or Submit to the user unless they told you to submit.
   - Forms and quizzes (Google Forms, Microsoft Forms, Canvas, Schoology): read every question first with read_page, then answer them in order, choosing options by their visible text. Check each answer took before going on, and stop at Submit unless the user told you to submit.
   - Sites: Gmail compose is the Compose button (c), with To, Subject and the body; Outlook is New mail. Google Sheets: click a cell or use the Name box, type, Tab or Enter to move. Google Slides: click a text box to type into it. YouTube: the search box, then the video; captions and the transcript (More → Show transcript) give you what it says. Amazon and shops: search, filter, compare price, rating and delivery; never buy without the user's OK. Wikipedia and news: read_url is faster than a tab. Maps: search the place, then Directions. Quizlet, Khan Academy, Desmos, Canva and Notion: work through what's on screen like any app.
@@ -1636,6 +1648,7 @@ public partial class MainWindow
    "save_file" => "Saved " + (input?["name"]?.ToString() ?? "a file"),
    "list_files" => "Looked in " + (path.Length > 0 ? path : "the folder"), "read_file" => "Read " + path, "write_file" => "Wrote " + path, "edit_file" => "Edited " + path, "delete_file" => "Deleted " + path, "request_folder" => (input?["write"]?.ToString() == "true" ? "Asked to work in " : "Asked to see ") + path,
    "find" => "Looked for " + (o2(input, "text") ?? "text"), "press_key" => "Pressed " + (input?["key"]?.ToString() ?? "a key"),
+   "click_at" => "Clicked on the page", "drag" => "Dragged on the page",
    "handle_dialog" => "Answered a dialog", "upload_file" => "Picked a file", "user_confirmed" => "", "list_profiles" => "Looked at profiles",
    "load_skill" => "", "run_plugin_program" => "", "remember" => "Saved to memory", "update_knowledge" => "Updated a knowledge file", "recall" => "Checked memory", "forget" => "Removed from memory", "read_knowledge" => "Read a knowledge file", "open_memory_source" => "Checked where a memory came from", "list_connected_plugins" or "find_plugins" => "Looked at apps", "get_plugin_tools" => "Looked at " + (input?["plugin"]?.ToString() ?? "an app"),
    _ => tool.Replace('_', ' ') + (arg.Length > 0 ? " " + arg : ""),
@@ -1669,7 +1682,7 @@ public partial class MainWindow
   ("Read", "Reading", "Didn't read"), ("Looked", "Looking", "Didn't look"), ("Took", "Taking", "Didn't take"), ("Opened", "Opening", "Didn't open"), ("Went", "Going", "Didn't go"),
   ("Clicked", "Clicking", "Didn't click"), ("Typed", "Typing", "Didn't type"), ("Scrolled", "Scrolling", "Didn't scroll"), ("Waited", "Waiting", "Stopped waiting"), ("Reloaded", "Reloading", "Didn't reload"),
   ("Switched", "Switching", "Didn't switch"), ("Closed", "Closing", "Didn't close"), ("Saved", "Saving", "Didn't save"), ("Pressed", "Pressing", "Didn't press"), ("Answered", "Answering", "Didn't answer"),
-  ("Picked", "Picking", "Didn't pick"), ("Updated", "Updating", "Didn't update"), ("Checked", "Checking", "Didn't check"), ("Removed", "Removing", "Nothing removed"),
+  ("Picked", "Picking", "Didn't pick"), ("Updated", "Updating", "Didn't update"), ("Checked", "Checking", "Didn't check"), ("Removed", "Removing", "Nothing removed"), ("Dragged", "Dragging", "Didn't drag"), ("Held", "Holding", "Didn't hold"),
   ("Wrote", "Writing", "Didn't write"), ("Edited", "Editing", "Didn't edit"), ("Deleted", "Deleting", "Didn't delete")];
  static bool Says(string text, string word) => text == word || text.StartsWith(word + " ", StringComparison.Ordinal);
  static string Doing(string label) { foreach (var w in StepWords) if (Says(label, w.Done)) return w.Doing + label[w.Done.Length..]; return label; }

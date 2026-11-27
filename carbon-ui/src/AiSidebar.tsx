@@ -63,7 +63,7 @@ export type Run = { id: string; root?: string | null; started: string; question?
 /// search, a teammate), as the host sends them. Between tools it's thinking.
 const DOING: Record<string, string> = {
  web_search: "Searching for “$”", read_url: "Reading $", open_tab: "Opening $", navigate: "Going to $", read_page: "Reading $", find: "Looking through $",
- click: "Clicking on $", type: "Typing on $", press_key: "Pressing a key on $", scroll: "Scrolling $", wait_for: "Waiting for $", screenshot: "Looking at $",
+ click: "Clicking on $", click_at: "Clicking on $", drag: "Dragging on $", type: "Typing on $", press_key: "Pressing a key on $", scroll: "Scrolling $", wait_for: "Waiting for $", screenshot: "Looking at $",
  go_back: "Going back", go_forward: "Going forward", reload: "Reloading $", switch_tab: "Switching to $", close_tab: "Closing a tab", save_file: "Saving $",
  upload_file: "Attaching a file", handle_dialog: "Answering a dialog on $", ask_user: "Waiting for your answer", ask_companion: "Asking $", tell_companion: "Handing work to $",
  remember: "Saving to memory", recall: "Checking memory", forget: "Updating memory", read_knowledge: "Reading notes", update_knowledge: "Updating notes", load_skill: "Getting ready",

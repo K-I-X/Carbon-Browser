@@ -1040,7 +1040,9 @@ Run \`${exe} --cli help\` to list tools. Common ones:
 - find text=<words>: matching buttons/links/fields with ids, and matching lines of text, from the whole page
 - click id=<id> (or selector=<css> | text=<visible text>)
 - type id=<id> text=<text> [append=true] [submit=true] (replaces the field's text; on a dropdown, picks that option)
-- press_key key=<Enter | Escape | Tab | Control+A ...>
+- press_key key=<Enter | Escape | Tab | Control+A ...> [holdMs=<ms>]
+- click_at x=<px> y=<px> [button=right] [double=true]: clicks a spot from your last screenshot (canvases, 3D, maps)
+- drag fromX=<px> fromY=<px> toX=<px> toY=<px>: drag and drop, move, draw or turn a 3D view
 - scroll direction=down [amount=800] | scroll id=<id>
 - wait_for id=<id> | selector=<css> | text=<text> [gone=true] [timeoutMs=10000]
 - handle_dialog [accept=false] [text=<answer>]: answers an alert/confirm/prompt the page opened

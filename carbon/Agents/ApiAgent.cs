@@ -423,7 +423,15 @@ public sealed class ApiRun : AgentRun
     ["content"] = new JsonArray([.. x.Content.Select(c => c?["type"]?.GetValue<string>() == "image"
      ? new JsonObject { ["type"] = "image", ["source"] = new JsonObject { ["type"] = "base64", ["media_type"] = c["mimeType"]?.DeepClone(), ["data"] = c["data"]?.DeepClone() } }
      : (JsonNode)new JsonObject { ["type"] = "text", ["text"] = c?["text"]?.DeepClone() ?? "" })]), ["is_error"] = !x.Ok })]) });
-  else foreach (var x in results) messages.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = x.Id, ["content"] = Text(x.Content) });
+  else {
+   bool sees = p.Url.Contains("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase); // Gemini sees pictures
+   foreach (var x in results) messages.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = x.Id, ["content"] = sees ? string.Join("\n", x.Content.Select(c => c?["type"]?.GetValue<string>() == "text" ? c["text"]?.GetValue<string>() : "(The screenshot follows.)")) : Text(x.Content) });
+   // A tool's answer holds text only here: its pictures follow as the next message, the way the model takes images.
+   var pictures = sees ? results.SelectMany(x => x.Content).Where(c => c?["type"]?.GetValue<string>() == "image").ToList() : [];
+   if (pictures.Count > 0)
+    messages.Add(new JsonObject { ["role"] = "user", ["content"] = new JsonArray([(JsonNode)new JsonObject { ["type"] = "text", ["text"] = "[Carbon] The screenshot from your last step:" },
+     .. pictures.Select(c => (JsonNode)new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = "data:" + (c?["mimeType"]?.GetValue<string>() ?? "image/png") + ";base64," + c?["data"]?.GetValue<string>() } })]) });
+  }
  }
 
  /// Checks an API provider for Settings, in plain words: the address, the key, the model, streaming and tool calls. It

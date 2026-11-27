@@ -68,7 +68,7 @@ public partial class MainWindow
  }
  // These act on a page, so they take its turn: one at a time, whoever is asking. Reads run alongside, and handle_dialog
  // never waits: the step holding the turn may be stuck behind that very dialog.
- static bool TakesTurn(string tool) => tool is "click" or "type" or "press_key" or "scroll" or "navigate" or "go_back" or "go_forward" or "reload" or "close_tab" or "upload_file";
+ static bool TakesTurn(string tool) => tool is "click" or "click_at" or "drag" or "type" or "press_key" or "scroll" or "navigate" or "go_back" or "go_forward" or "reload" or "close_tab" or "upload_file";
  static bool agentServerStarted;
  internal static MainWindow Home => LastActive is { closing: false, temporary: false, incognito: false } w ? w : Windows.FirstOrDefault(w => !w.closing && !w.temporary && !w.incognito) ?? Windows.FirstOrDefault(w => !w.closing && !w.temporary) ?? Windows.First(w => !w.closing);
 
@@ -487,8 +487,8 @@ public partial class MainWindow
    });
    return best; // covered, it still comes back, so the click can say what's on top of it
   };
-  const target = o => o.id ? byId(o.id) : o.selector ? bySel(o.selector) : o.text ? byText(o.text) : null;
-  const missing = o => ({ error: o.id ? 'gone' : 'notfound' });
+  const target = o => o.id ? byId(o.id) : o.selector ? bySel(o.selector) : o.text ? byText(o.text) : o.at ? deepAt(o.at.x, o.at.y) : null;
+  const missing = o => ({ error: o.id ? 'gone' : o.at ? 'offscreen' : 'notfound' });
   // A fingerprint of a field's text, to tell whether typing changed it.
   const sig = e => { const s = !e ? '' : e.isContentEditable ? e.innerText : String(e.value ?? ''); let h = 0; for (let i = 0; i < s.length; i++) h = h * 31 + s.charCodeAt(i) | 0; return s.length + ':' + h; };
   // Where a click at this point lands, through open shadow roots and same-origin frames.
@@ -711,7 +711,7 @@ public partial class MainWindow
  // upload_file by element: the file input itself, for DOM.setFileInputFiles.
  // Is this click or keystroke sensitive: buying, sending, deleting, a form that posts, a password or payment field?
  const string SensitiveJs = """
-  const e = o.tool !== 'press_key' && (o.id || o.selector || (o.tool === 'click' && o.text)) ? target(o) : deepActive();
+  const e = o.tool !== 'press_key' && (o.id || o.selector || (o.tool === 'click' && o.text) || o.at) ? target(o) : deepActive();
   if (!e && o.tool !== 'press_key') return missing(o);
   if (!e || /^(body|html)$/.test(e.localName) && !e.isContentEditable) {
    if (o.tool === 'type') return { error: 'nofocus' };
@@ -964,12 +964,12 @@ public partial class MainWindow
   if (been.Length > 0 && !root.Known.Contains(been)) root.Known.Add(been);
   int signedIn = run.Chat.Ephemeral ? 1 : 2; // an incognito window holds nothing else
   root.Read = Math.Max(root.Read, tool switch {
-   "read_page" or "find" or "screenshot" or "wait_for" or "click" or "type" or "press_key" or "handle_dialog" or "list_tabs" or "run_plugin_action" or "read_file" or "list_files" => signedIn, // the user's own files count as signed in
+   "read_page" or "find" or "screenshot" or "wait_for" or "click" or "click_at" or "drag" or "type" or "press_key" or "handle_dialog" or "list_tabs" or "run_plugin_action" or "read_file" or "list_files" => signedIn, // the user's own files count as signed in
    "read_url" => step.SignedOut ? 1 : signedIn,
    "web_search" or "read_attachment" => 1,
    _ => 0 });
   root.Web = Math.Max(root.Web, tool switch {
-   "read_page" or "find" or "screenshot" or "wait_for" or "click" or "type" or "press_key" or "handle_dialog" or "run_plugin_action" => signedIn,
+   "read_page" or "find" or "screenshot" or "wait_for" or "click" or "click_at" or "drag" or "type" or "press_key" or "handle_dialog" or "run_plugin_action" => signedIn,
    "read_url" => step.SignedOut ? 1 : signedIn,
    "web_search" => 1,
    _ => 0 }); // memory, the user's files, attachments and the list of tabs are no one else's words
@@ -983,11 +983,26 @@ public partial class MainWindow
   if (t.Id != step.TabId || tool != "navigate" && Host(t.Url) != step.Site) return false; // navigate's site is where it's going
   if (step.Print.Length == 0) return true;
   try {
-   var look = await Js((await AgentPage(who, args)).core, SensitiveJs, Probe(tool, args));
+   var look = await Js((await AgentPage(who, args)).core, SensitiveJs, Probe(tool, args, t.Id));
    return Str(look, "print") == step.Print && Str(look, "why") == step.Why;
   } catch (InvalidOperationException) { return false; }
  }
- static object Probe(string tool, JsonElement args) => new { tool, id = Id(args), selector = S(args, "selector"), text = S(args, "text"), key = S(args, "key"), submit = B(args, "submit") };
+ static object Probe(string tool, JsonElement args, string tabId) => new { tool, id = Id(args), selector = S(args, "selector"), text = S(args, "text"), key = S(args, "key"), submit = B(args, "submit"),
+  at = tool switch { "click_at" => Spot(tabId, args, "x", "y"), "drag" => Spot(tabId, args, "fromX", "fromY"), _ => null } };
+ /// Screenshot pixels per page (CSS) pixel, per tab, from the last screenshot: the AI points in the picture it saw.
+ static readonly System.Collections.Concurrent.ConcurrentDictionary<string, double> shotScale = new();
+ /// A spot the AI picked in its screenshot, in the page's own pixels.
+ static object? Spot(string tabId, JsonElement args, string xs, string ys)
+ {
+  if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty(xs, out _) || !args.TryGetProperty(ys, out _)) return null;
+  double scale = shotScale.TryGetValue(tabId, out var sc) && sc > 0.1 ? sc : 1;
+  return new { x = Math.Max(0, N(args, xs, 0) / scale), y = Math.Max(0, N(args, ys, 0) / scale) };
+ }
+ static (double X, double Y) SpotXY(string tabId, JsonElement args, string xs, string ys)
+ {
+  double scale = shotScale.TryGetValue(tabId, out var sc) && sc > 0.1 ? sc : 1;
+  return (Math.Max(0, N(args, xs, 0) / scale), Math.Max(0, N(args, ys, 0) / scale));
+ }
  static string SiteOf(string input) => (input = input.Trim().ToLowerInvariant()).Length == 0 ? "" : Host(input.Contains("://") ? input : "https://" + input);
  static readonly HashSet<string> sessionGrants = []; // outside apps: "who action site" allowed until Carbon closes
  /// The rule that applies, most specific first: this companion on this site, this companion anywhere, everyone on this site,
@@ -1011,7 +1026,7 @@ public partial class MainWindow
   string action = tool switch {
    "read_page" or "find" or "screenshot" or "wait_for" or "web_search" or "read_url" => "read",
    "open_tab" or "navigate" or "go_back" or "go_forward" or "reload" or "switch_tab" or "close_tab" => "navigate",
-   "click" or "type" or "press_key" or "scroll" or "handle_dialog" => "interact",
+   "click" or "click_at" or "drag" or "type" or "press_key" or "scroll" or "handle_dialog" => "interact",
    _ => "" }; // list_tabs shows no page; ask_user and save_file stay in Carbon; upload_file asks every time on its own
   if (action.Length == 0) return null;
   string site, what, why = "", url = "";
@@ -1025,20 +1040,22 @@ public partial class MainWindow
     site = Host(AgentTab(who, args).tab.Url);
     what = tool switch { "scroll" => "Scroll the page", "press_key" => "Press " + S(args, "key"), "handle_dialog" => "Answer the page's dialog", "go_back" => "Go back",
      "go_forward" => "Go forward", "reload" => "Reload the page", "close_tab" => "Close a tab", "switch_tab" => "Switch tabs", _ => "Read the page" };
-    if (tool is "click" or "type" or "press_key") {
+    if (tool is "click" or "click_at" or "drag" or "type" or "press_key") {
      var page = await AgentPage(who, args);
      // Pages re-render under the AI: a control that isn't there yet is waited for here, so it's asked about like any other.
      var look = await Settled(page.t, page.core, async () => {
-      var seen = await Js(page.core, SensitiveJs, Probe(tool, args));
+      var seen = await Js(page.core, SensitiveJs, Probe(tool, args, page.t.Id));
       return seen.ValueKind == JsonValueKind.Object ? seen : throw new PageMiss(true, "The page is still loading, so nothing was done. Call read_page, then try again.");
      });
      string label = Str(look, "label"); why = step.Why = Str(look, "why"); step.Print = Str(look, "print");
      // AIs never type a password: they wait while the user signs in.
-     if (look.GetProperty("password").GetBoolean() && !(tool == "press_key" && S(args, "key") is "Tab" or "Escape" or "Esc") && tool != "click") {
+     if (look.GetProperty("password").GetBoolean() && !(tool == "press_key" && S(args, "key") is "Tab" or "Escape" or "Esc") && tool is not ("click" or "click_at" or "drag")) {
       var (w, t) = AgentTab(who, args); await AskToSignIn(who, w, t, site);
       return Fail(SigningIn(site));
      }
      if (tool == "click") what = "Click “" + label + "”";
+     else if (tool == "click_at") what = "Click " + (label.Length > 0 && label != "the page" ? "“" + label + "”" : "a spot on the page");
+     else if (tool == "drag") what = "Drag on " + (label.Length > 0 && label != "the page" ? "“" + label + "”" : "the page");
      else if (tool == "type") what = look.GetProperty("secret").GetBoolean() || S(args, "text").Length == 0 ? "Type into “" + label + "”" : "Type “" + Clip(S(args, "text"), 60) + "” into “" + label + "”";
     }
    }
@@ -1295,6 +1312,24 @@ public partial class MainWindow
   await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", JsonSerializer.Serialize(new { type = "keyUp", modifiers, key = name, code, windowsVirtualKeyCode = vk }));
  }
 
+ /// Holds a key down for a while, with the repeats a real keyboard sends, then lets go.
+ static async Task HoldKey(CoreWebView2 core, string combo, int ms, AgentStep step)
+ {
+  string key = combo.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? throw new ArgumentException("Pass a key, like W or ArrowUp.");
+  (string code, int vk) = Keys.TryGetValue(key, out var k) ? (k.Code, k.Vk)
+   : key.Length == 1 && char.IsLetterOrDigit(key[0]) ? ((char.IsLetter(key[0]) ? "Key" : "Digit") + char.ToUpperInvariant(key[0]), (int)char.ToUpperInvariant(key[0])) : throw new ArgumentException("Unknown key: " + key);
+  string name = Keys.TryGetValue(key, out var named) ? named.Code : key.ToLowerInvariant();
+  object Ev(string type, bool repeat) => new { type, key = name, code, windowsVirtualKeyCode = vk, nativeVirtualKeyCode = vk, autoRepeat = repeat };
+  await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", JsonSerializer.Serialize(Ev("rawKeyDown", false)));
+  try {
+   for (var until = DateTime.UtcNow.AddMilliseconds(ms); DateTime.UtcNow < until;) {
+    if (step.Abandoned) break;
+    await Task.Delay(50);
+    await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", JsonSerializer.Serialize(Ev("rawKeyDown", true)));
+   }
+  } finally { await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", JsonSerializer.Serialize(Ev("keyUp", false))); }
+ }
+
  async Task<string> RunTool(string who, string tool, JsonElement args, bool quick, AgentStep step)
  {
   switch (tool) {
@@ -1399,7 +1434,12 @@ public partial class MainWindow
      await core.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, ms);
     }
     finally { if (prints.Length > 0) await Js(core, MaskJs, new { prints, on = false }); if (under != null) w.ShowPage(); }
-    Did(who, "Took a screenshot"); return Reply(new { image = Convert.ToBase64String(ms.ToArray()), mimeType = "image/png" });
+    var png = ms.ToArray();
+    int pw = png.Length > 24 ? png[16] << 24 | png[17] << 16 | png[18] << 8 | png[19] : 0, ph = png.Length > 24 ? png[20] << 24 | png[21] << 16 | png[22] << 8 | png[23] : 0;
+    double cssW = double.TryParse(await core.ExecuteScriptAsync("innerWidth"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var iw) ? iw : 0;
+    if (pw > 0 && cssW > 0) shotScale[t.Id] = pw / cssW;
+    Did(who, "Took a screenshot");
+    return Reply(new { image = Convert.ToBase64String(png), mimeType = "image/png", note = pw > 0 ? $"Screenshot of the visible page, {pw}×{ph} pixels. To act on something in it, pass its x and y in these pixels to click_at, drag or scroll." : null });
    }
    case "click": {
     var (w, t, core) = await AgentPage(who, args);
@@ -1416,6 +1456,42 @@ public partial class MainWindow
     if (label.Length > 0 && runs.GetValueOrDefault(who)?.Chat.Messages.LastOrDefault(m => m.Role == "tool" && m.Text == numbered) is { } row) row.Text = "Clicking “" + label + "”";
     if (await Verdict(who, t, core, before, urlBefore, "", label, step) is { } missed) return missed;
     Did(who, "Clicked '" + label + "'"); return Reply(Outcome(who, t, before, "Clicked \"" + label + "\""));
+   }
+   case "click_at": case "drag": {
+    var (w, t, core) = await AgentPage(who, args);
+    string before = agentTabs.GetValueOrDefault(who) ?? "", button = S(args, "button") is "right" or "middle" ? S(args, "button") : "left";
+    int buttons = button switch { "right" => 2, "middle" => 4, _ => 1 };
+    bool drag = tool == "drag";
+    var (x, y) = SpotXY(t.Id, args, drag ? "fromX" : "x", drag ? "fromY" : "y");
+    var (x2, y2) = drag ? SpotXY(t.Id, args, "toX", "toY") : (x, y);
+    var size = await Js(core, "return { w: innerWidth, h: innerHeight };", new { });
+    double vw = size.GetProperty("w").GetDouble(), vh = size.GetProperty("h").GetDouble();
+    if (x > vw || y > vh || x2 > vw || y2 > vh) return Fail($"That spot is outside the visible page. Take a screenshot and use x and y inside it.");
+    await Pointer(who, t, core, x, y);
+    t.AgentActedAt = DateTime.UtcNow;
+    step.Live();
+    Task Mouse(string type, double mx, double my, int held, int count = 0) => core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent",
+     JsonSerializer.Serialize(new { type, x = mx, y = my, button = type == "mouseMoved" && held == 0 ? "none" : button, buttons = held, clickCount = count, pointerType = "mouse" }));
+    await Mouse("mouseMoved", x, y, 0);
+    if (!drag) {
+     int clicks = B(args, "double") ? 2 : 1;
+     for (int c = 1; c <= clicks; c++) { await Mouse("mousePressed", x, y, buttons, c); await Mouse("mouseReleased", x, y, 0, c); }
+    } else {
+     int steps = (int)Math.Clamp(N(args, "steps", 12), 2, 200);
+     await Mouse("mousePressed", x, y, buttons, 1);
+     await Task.Delay(60);
+     for (int i = 1; i <= steps; i++) {
+      step.Live();
+      await Mouse("mouseMoved", x + (x2 - x) * i / steps, y + (y2 - y) * i / steps, buttons);
+      await Task.Delay(16);
+     }
+     await Mouse("mouseReleased", x2, y2, 0, 1);
+    }
+    await Task.Delay(350);
+    if (t.Loading) await WaitLoaded(t, 8000);
+    string what = drag ? $"Dragged from ({N(args, "fromX", 0):0}, {N(args, "fromY", 0):0}) to ({N(args, "toX", 0):0}, {N(args, "toY", 0):0})" : (B(args, "double") ? "Double-clicked" : button == "right" ? "Right-clicked" : "Clicked") + $" at ({N(args, "x", 0):0}, {N(args, "y", 0):0})";
+    Did(who, what);
+    return Reply(Outcome(who, t, before, what + ". Take a screenshot to see what changed."));
    }
    case "type": {
     var (w, t, core) = await AgentPage(who, args);
@@ -1466,6 +1542,14 @@ public partial class MainWindow
     string before = agentTabs.GetValueOrDefault(who) ?? "";
     t.AgentActedAt = DateTime.UtcNow;
     string urlBefore = t.Url;
+    int hold = (int)Math.Clamp(N(args, "holdMs", 0), 0, 5000);
+    if (hold > 0) {
+     // Held down, like walking with W in a 3D space: the page sees repeats while it's down. Canvases change without Carbon
+     // seeing it, so this one isn't checked; the AI looks with a screenshot.
+     step.Live();
+     await HoldKey(core, S(args, "key"), hold, step);
+     Did(who, "Held " + S(args, "key")); return Reply(Outcome(who, t, before, $"Held {S(args, "key")} for {hold} ms. Take a screenshot to see where that got you."));
+    }
     await Js(core, WatchJs, new { expect = step.Print }); await Deliver(core, step, () => PressKey(core, S(args, "key")));
     if (await Verdict(who, t, core, before, urlBefore, S(args, "key"), "", step) is { } nothing) return nothing;
     Did(who, "Pressed " + S(args, "key")); return Reply(Outcome(who, t, before, "Pressed " + S(args, "key")));
@@ -1473,6 +1557,19 @@ public partial class MainWindow
    case "scroll": {
     var (w, t, core) = await AgentPage(who, args);
     step.Live();
+    if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty("x", out _) && args.TryGetProperty("y", out _)) {
+     var (wx, wy) = SpotXY(t.Id, args, "x", "y");
+     double dy = (S(args, "direction") == "up" ? -1 : 1) * (N(args, "amount", 0) is > 0 and var a ? Math.Min(a, 20000) : 300);
+     await Pointer(who, t, core, wx, wy);
+     await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", JsonSerializer.Serialize(new { type = "mouseMoved", x = wx, y = wy, button = "none" }));
+     for (double left = dy; Math.Abs(left) > 0.5;) {
+      double part = Math.Abs(left) > 120 ? Math.Sign(left) * 120 : left;
+      await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", JsonSerializer.Serialize(new { type = "mouseWheel", x = wx, y = wy, deltaX = 0, deltaY = part, button = "none" }));
+      left -= part; await Task.Delay(16);
+     }
+     string turned = "Turned the mouse wheel " + (dy < 0 ? "up" : "down") + $" at ({N(args, "x", 0):0}, {N(args, "y", 0):0})";
+     Did(who, turned); return Reply(new { done = turned + ". Take a screenshot to see what changed." });
+    }
     var r = await Js(core, ScrollJs, new { id = Id(args), selector = S(args, "selector"), direction = S(args, "direction"), amount = Math.Clamp(N(args, "amount", 0), 0, 20000) });
     Did(who, Str(r, "done")); return Reply(new { done = Str(r, "done"), at = Str(r, "at") is { Length: > 0 } at ? at : null });
    }
