@@ -462,7 +462,8 @@ public partial class MainWindow
   _ => ("", "") };
  static readonly string[] Tiers = ["efficient", "default", "expert"];
  static readonly HashSet<string> tierFailed = []; // "ai:mode" whose model wasn't on the user's plan: flagged in Settings
- static readonly Dictionary<string, string> onDefault = []; // chat id: its next run uses the AI's default model, with this note
+ static readonly Dictionary<string, string> onDefault = [];
+ static readonly Dictionary<string, int> carbonTries = []; // chat id: free models Carbon AI has tried for this message // chat id: its next run uses the AI's default model, with this note
  /// Claude Code's reply when the model isn't one the user can use (checked with 2.1.316). Other apps' wording isn't known yet.
  static bool NotOnPlan(string reply) => reply.StartsWith("There's an issue with the selected model", StringComparison.Ordinal);
  static string ModelName(string ai, string model) => aiModels.GetValueOrDefault(ai, []).FirstOrDefault(m => m.Id == model)?.Name ?? model;
@@ -1204,7 +1205,10 @@ public partial class MainWindow
   var cli = AiClis.FirstOrDefault(c => c.Id == chat.Harness) ?? AiClis[0];
   if (FindCli(cli.Command) is not { } exe) {
    aiPending = shown ?? text; aiPendingChat = chat;
-   if (cli is CarbonAiAdapter) { if (aiStatus.GetValueOrDefault(cli.Id) != "installing") _ = PrepareCarbonAi(); } // sent once it's ready
+   if (cli is CarbonAiAdapter) { // sent once it's ready; meanwhile the chat says why nothing has happened yet
+    if (aiStatus.GetValueOrDefault(cli.Id) != "installing") _ = PrepareCarbonAi();
+    Toast("Carbon AI is getting ready (a one-time download). Your message goes as soon as it's done.");
+   }
    else aiStatus[cli.Id] = "missing";
    return;
   }
@@ -1274,6 +1278,7 @@ public partial class MainWindow
   if (listed == null) model = effort = ""; else if (!listed.Efforts.Contains(effort)) effort = "";
   if (onDefault.Remove(chat.Id, out var planNote)) { model = effort = ""; chat.Messages.Insert(from, new() { Role = "note", Text = planNote }); from++; }
   AgentRun? run = null;
+  bool stalled = false; // Carbon AI: its free model said nothing for too long, so the run was stopped and another model answers
   try {
    if (cli.NamesSession) chat.Session ??= Guid.NewGuid().ToString();
    var request = new RunRequest(prompt, model, effort, folder, mcp, chat.Session, chat.Started && chat.Session != null) { Forget = chat.Ephemeral && cli.Forgets };
@@ -1281,14 +1286,18 @@ public partial class MainWindow
    run = me.Run = await cli.Start(exe, request);
    if (me.Stopped) run.Cancel();
    bool named = !kickoffs.Contains(chat.Id); // a kickoff (no message of the user's) is named from the companion's hello, once it's written
+   bool heard = false;
+   var quiet = run;
+   using var watch = cli is CarbonAiAdapter ? new Timer(_ => { if (!heard && !quiet.Cancelled) { stalled = true; quiet.Cancel(); } }, null, CarbonAi.Patience, Timeout.InfiniteTimeSpan) : null;
    await foreach (var e in run.Events()) {
+    if (e is AgentEvent.Message or AgentEvent.ToolCall or AgentEvent.Thinking) heard = true;
     said |= ApplyEvent(chat, cli, e);
     if (!named && e is not AgentEvent.Message && chat.Messages.Find(m => m.Role == "assistant") is { } hello) { named = true; NameFromHello(chat, hello.Text); }
     if (e is AgentEvent.Message) PublishAiSoon(); else PublishAiEverywhere();
    }
    if (!named && chat.Messages.Find(m => m.Role == "assistant") is { } spoke) NameFromHello(chat, spoke.Text);
    chat.Started = chat.Session != null;
-   stopped = run.Cancelled && !run.TimedOut;
+   stopped = run.Cancelled && !run.TimedOut && !stalled;
    bool lost = run.Errors.Any(LostSession) || LostSession(chat.Error);
    if (lost && !said && !stopped && (cli.NamesSession || request.Resume)) {
     // The CLI has no record of this chat (stopped before it saved it, or from before chats had their own folders):
@@ -1313,6 +1322,26 @@ public partial class MainWindow
     await RunAi(chat, shown.Length > 0 ? shown : ResumeBrief(me.Task), shown: shown, asker: asker);
     return;
    }
+   // Carbon AI: a free model that failed or said nothing in time rests for a while, and the next free model answers the same
+   // message (up to three in a row). The chat says so in one line.
+   if (cli is CarbonAiAdapter && !said && !stopped && (stalled || run.ExitCode != 0 || chat.Error.Length > 0)) {
+    if (CarbonAi.Used(folder) is { } tired) CarbonAi.Failed(tired);
+    int tries = carbonTries.GetValueOrDefault(chat.Id) + 1;
+    if (tries <= 3) {
+     carbonTries[chat.Id] = tries;
+     int cut = shown.Length > 0 ? chat.Messages.FindLastIndex(m => m.Role == "user") : from;
+     if (cut >= 0) chat.Messages.RemoveRange(cut, chat.Messages.Count - cut);
+     onDefault[chat.Id] = stalled ? "That free model was taking too long, so another free model is answering." : "That free model couldn't answer, so another free model is answering.";
+     chat.Session = null; chat.Started = false; chat.Error = "";
+     runs.Remove(chat.Id); run.Dispose(); run = null;
+     me.Task.State = "interrupted";
+     await RunAi(chat, shown.Length > 0 ? shown : ResumeBrief(me.Task), shown: shown, asker: asker);
+     return;
+    }
+    carbonTries.Remove(chat.Id);
+    chat.Error = "Carbon AI's free models are busy right now. Try again in a minute, or pick another AI in Settings → Models.";
+   }
+   if (said) carbonTries.Remove(chat.Id);
    // Setup is done once the companion has answered the user in a regular chat that had it.
    if (said && regular && (setup || hadSetup) && who!.Setup == "pending") { who.Setup = "done"; who.SetupAt = DateTime.UtcNow; who.SetupVersion = CompanionMemory.Ver(setupSkill!.Body); SaveLater(); }
    if (run.TimedOut) chat.Error = $"Stopped: {cli.Name} reached the {AgentRun.Limit.TotalMinutes:0}-minute limit for one reply.";
@@ -1337,7 +1366,7 @@ public partial class MainWindow
    chat.Updated = DateTime.UtcNow; chat.Unread = !Windows.Any(w => w.Showing(chat)); SaveAiChats();
    try { if (promptFile.Length > 0) File.Delete(promptFile); } catch (IOException) { }
   }
-  if (!said && await NeedsSignIn(cli, chat.Error)) {
+  if (!said && cli is not CarbonAiAdapter && await NeedsSignIn(cli, chat.Error)) { // Carbon AI has nothing to sign in to
    // Signed out: the chat shows the command to sign in from a terminal (Carbon never runs it), and the message runs again once the user says they're done.
    chat.Error = ""; aiStatus[cli.Id] = "signedOut"; aiPending = shown ?? text; aiPendingChat = chat;
    TaskState(me, "waiting", "signin");

@@ -17,7 +17,8 @@ static class CarbonAi
  public const string Id = "carbonai";
  public const string Name = "Carbon AI";
  const string Registry = "https://registry.npmjs.org/";
- public const string FallbackModel = "opencode/big-pickle";
+ // Until OpenCode lists today's free models: fast ones first, the slower Big Pickle last.
+ static readonly string[] Fallbacks = ["opencode/deepseek-v4.1-flash-free", "opencode/mimo-v2.6-flash-free", "opencode/hy4-flash-free", "opencode/nemotron-3.5-lightning-free", "opencode/big-pickle"];
  public static string Home => Path.Combine(App.ProfileHome.Length > 0 ? App.ProfileHome : App.DataRoot, "carbon-ai");
  public static string Exe => Path.Combine(Home, "bin", "opencode.exe");
  static string Package => RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "opencode-windows-arm64" : "opencode-windows-x64-baseline";
@@ -26,12 +27,24 @@ static class CarbonAi
  public static string Progress { get; private set; } = ""; // "Getting Carbon AI ready… 42%" while it downloads
  public static string Error { get; private set; } = "";
  public static bool Ready => File.Exists(Exe);
+ /// How long a free model may stay silent (no words, no step) before the next one answers instead.
+ public static readonly TimeSpan Patience = TimeSpan.FromSeconds(60);
  /// The free models OpenCode listed last, best first. Runs use the first unless the user picked another free one.
  public static List<string> Free { get; set; } = [];
- public static string Best => Free.FirstOrDefault() ?? FallbackModel;
+ /// Free models that failed or went quiet lately: skipped for 10 minutes, so the next message goes to one that answers.
+ static readonly Dictionary<string, DateTime> failed = [];
+ static readonly Dictionary<string, string> used = []; // run folder → the model its run asked for
+ public static void Failed(string model) { lock (failed) failed[model] = DateTime.UtcNow; }
+ public static bool Resting(string model) { lock (failed) return failed.TryGetValue(model, out var at) && DateTime.UtcNow - at < TimeSpan.FromMinutes(10); }
+ public static string? Used(string folder) { lock (used) return used.GetValueOrDefault(folder); }
+ internal static void Using(string folder, string model) { lock (used) used[folder] = model; }
+ public static string Best => (Free.Count > 0 ? Free : [.. Fallbacks]).FirstOrDefault(m => !Resting(m)) ?? (Free.Count > 0 ? Free[0] : Fallbacks[0]);
+ /// Each model's thinking levels (OpenCode's variants), lowest first: Carbon AI thinks as little as it can, to answer fast.
+ public static readonly Dictionary<string, string[]> Efforts = [];
+ public static string Quick(string model) => Efforts.GetValueOrDefault(model, []).FirstOrDefault(v => v is "none" or "minimal" or "low") ?? "";
  public static bool IsFree(string model) => model.StartsWith("opencode/", StringComparison.Ordinal) && (model.EndsWith("-free", StringComparison.Ordinal) || model.Contains("big-pickle", StringComparison.Ordinal));
  /// Better at tools and quicker first: these name fragments go to the front, in this order.
- static readonly string[] Prefer = ["big-pickle", "deepseek", "kimi", "glm", "minimax", "qwen", "mimo", "hy4", "nemotron"];
+ static readonly string[] Prefer = ["deepseek-v4.1-flash", "flash", "lightning", "deepseek", "mimo", "hy4", "nemotron", "kimi", "glm", "minimax", "qwen", "big-pickle"];
  public static int Rank(string id) { for (int i = 0; i < Prefer.Length; i++) if (id.Contains(Prefer[i], StringComparison.OrdinalIgnoreCase)) return i; return Prefer.Length; }
 
  /// Its own settings, data and cache in Carbon's folder: never the user's OpenCode, and never an update it didn't ask for.
@@ -110,8 +123,18 @@ sealed class CarbonAiAdapter : OpenCodeAdapter
   var all = await base.Models(exe);
   var free = all.Where(m => CarbonAi.IsFree(m.Id)).OrderBy(m => CarbonAi.Rank(m.Id)).ThenBy(m => m.Id, StringComparer.Ordinal).ToList();
   if (free.Count > 0) CarbonAi.Free = [.. free.Select(m => m.Id)];
+  foreach (var m in free) CarbonAi.Efforts[m.Id] = m.Efforts;
   return [new("", "Automatic (best free model)", []), .. free.Select(m => m with { Name = m.Name.Replace(" · opencode", "") + " · free" })];
  }
- /// Never anything but a free model: no model, or one that isn't free, runs on the best free one.
- public override Task<List<string>> Args(string exe, RunRequest r) => base.Args(exe, CarbonAi.IsFree(r.Model) ? r : r with { Model = CarbonAi.Best });
+ /// Never anything but a free model: no model, one that isn't free or one that just failed runs on the best free one.
+ /// With no effort picked, it thinks as little as the model allows, so replies come fast.
+ public override async Task<List<string>> Args(string exe, RunRequest r)
+ {
+  string model = CarbonAi.IsFree(r.Model) && !CarbonAi.Resting(r.Model) ? r.Model : CarbonAi.Best;
+  string effort = r.Effort.Length > 0 && model == r.Model ? r.Effort : CarbonAi.Quick(model);
+  CarbonAi.Using(r.Folder, model);
+  var args = await base.Args(exe, r with { Model = model, Effort = effort });
+  args.Add("--thinking"); // says when it's thinking, so the chat shows it working before the words come
+  return args;
+ }
 }
