@@ -221,6 +221,19 @@ function IconButton({ label, onClick, disabled, pressed, expanded, children }: {
 // "Your models": every agent app Carbon supports, with its logo and its state on this computer, read from the app itself
 // and never by signing in. Add shows how to install one. Set up shows the terminal command that signs in to it: Carbon never
 // runs a sign-in. With send, the Compatible API presets too, each added right here. Picking a row makes it the model for new chats. Nothing is installed unless the user asks.
+/// Gemini's free key: Google ended free sign-in for its Gemini app, so Carbon runs Gemini with a free key from Google AI
+/// Studio. Pasted here once; Carbon keeps it encrypted and sends it only to Google.
+export function GeminiKeyBox({ send }: { send: Send }) {
+ const [key, setKey] = useState("")
+ const ok = /^\S{20,200}$/.test(key.trim())
+ return <form className="gemini-key" onSubmit={e => { e.preventDefault(); if (ok) { send("geminiKey", { key: key.trim() }); setKey("") } }}>
+  <p>Gemini needs a free key from Google. <a href="https://aistudio.google.com/apikey" onClick={e => { e.preventDefault(); send("new", { url: "https://aistudio.google.com/apikey" }) }}>Get your free key</a> (sign in with Google, press <b>Create API key</b>, copy it), then paste it here:</p>
+  <div className="ai-row"><input type="password" autoComplete="off" spellCheck={false} aria-label="Gemini key" placeholder="Paste your Gemini key" value={key} onChange={e => setKey(e.target.value)} />
+   <Button size="sm" type="submit" disabled={!ok}>Save</Button></div>
+  <small>Kept encrypted on this computer and sent only to Google. Free, with a daily limit.</small>
+ </form>
+}
+
 export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: string) => void; send?: Send }) {
  const [howTo, setHowTo] = useState("")
  const [adding, setAdding] = useState<string | null>(null) // the API preset whose form is open ("": any other)
@@ -234,6 +247,7 @@ export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: strin
    : s === "ready" && h.free ? <><span className="byo-ok">Free · No account needed</span><Check aria-hidden /></>
    : s === "missing" && h.free ? "Free · Not downloaded yet"
    : s === "ready" ? <><span className="byo-ok">{h.api ? (ai.apis?.providers.find(p => p.id === h.id)?.noKey ? "Compatible API, no key" : "Uses your API key") : h.billing ? "Ready" : "Logged in"}</span><Check aria-hidden /></>
+   : s === "needsKey" && h.id === "gemini" ? "Free · Paste your free key"
    : s === "needsKey" ? "API provider · Needs a key"
    : s === "badKey" ? "API provider · Key not accepted"
    : s === "missing" ? "Not installed"
@@ -245,7 +259,9 @@ export function AiPicker({ ai, onPick, send }: { ai: AiState; onPick: (id: strin
     {chosen && <Check className="ai-pick-check" aria-label="Chosen" />}
    </button>
    {setUp && send && <Button size="sm" variant="outline" className="byo-act" aria-expanded={open} onClick={() => toggle(h.id)}>Set up<ChevronDown /></Button>}
-   {(s === "needsKey" || s === "badKey") && send && <Button size="sm" variant="outline" className="byo-act" onClick={() => { const keys = document.getElementById("set-apis"); if (keys) keys.scrollIntoView({ behavior: "smooth", block: "start" }); else openModelSettings(send) }}>{s === "badKey" ? "Replace key" : "Add key"}</Button>}
+   {(s === "needsKey" || s === "badKey") && send && h.id === "gemini" && <Button size="sm" variant="outline" className="byo-act" aria-expanded={open} onClick={() => toggle(h.id)}>{s === "badKey" ? "Replace key" : "Add key"}<ChevronDown /></Button>}
+   {open && (s === "needsKey" || s === "badKey") && send && h.id === "gemini" && <div className="byo-how"><GeminiKeyBox send={send} /></div>}
+   {(s === "needsKey" || s === "badKey") && send && h.id !== "gemini" && <Button size="sm" variant="outline" className="byo-act" onClick={() => { const keys = document.getElementById("set-apis"); if (keys) keys.scrollIntoView({ behavior: "smooth", block: "start" }); else openModelSettings(send) }}>{s === "badKey" ? "Replace key" : "Add key"}</Button>}
    {s === "missing" && <Button size="sm" variant="outline" className="byo-act" aria-expanded={open} onClick={() => toggle(h.id)}>Add<ChevronDown /></Button>}
    {open && setUp && <div className="byo-how"><SignInSteps h={h} send={send} /></div>}
    {!!h.billing && <p className="byo-gaps byo-billing">{h.billing}</p>}

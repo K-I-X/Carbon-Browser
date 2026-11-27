@@ -74,7 +74,7 @@ public static class ApiKeyStore
 }
 
 /// An API provider as one of the AIs: picked, set per mode and run like the apps, with no app to install or sign in to.
-sealed class ApiAdapter : AgentAdapter
+class ApiAdapter : AgentAdapter
 {
  public required ApiProvider Provider { get; init; }
  public static ApiAdapter Of(ApiProvider p) => new() { Provider = p, Id = p.Id, Name = p.Name, App = p.Name, Command = "", Maker = p.Kind == "anthropic" ? "Anthropic-compatible API" : "OpenAI-compatible API" };
@@ -318,9 +318,12 @@ public sealed class ApiRun : AgentRun
 
  async Task<Reply> OpenAi(Uri root, string key, string model, JsonArray messages, JsonArray tools)
  {
-  var body = new JsonObject { ["model"] = model, ["messages"] = messages.DeepClone(), ["stream"] = true, ["stream_options"] = new JsonObject { ["include_usage"] = true } };
-  if (tools.Count > 0) body["tools"] = new JsonArray([.. tools.Select(t => (JsonNode)new JsonObject { ["type"] = "function", ["function"] = new JsonObject {
-   ["name"] = t!["name"]!.DeepClone(), ["description"] = t["description"]?.DeepClone() ?? "", ["parameters"] = t["inputSchema"]?.DeepClone() ?? new JsonObject { ["type"] = "object" } } })]);
+  bool gemini = GeminiKey.Is(root); // Google's Gemini API: no stream_options, and tool schemas in the words it accepts
+  var body = new JsonObject { ["model"] = model, ["messages"] = messages.DeepClone(), ["stream"] = true };
+  if (!gemini) body["stream_options"] = new JsonObject { ["include_usage"] = true };
+  if (tools.Count > 0) body["tools"] = new JsonArray([.. tools.Select(t => { var schema = t!["inputSchema"]?.DeepClone() ?? new JsonObject { ["type"] = "object" };
+   return (JsonNode)new JsonObject { ["type"] = "function", ["function"] = new JsonObject {
+   ["name"] = t["name"]!.DeepClone(), ["description"] = t["description"]?.DeepClone() ?? "", ["parameters"] = gemini ? GeminiKey.Clean(schema) : schema } }; })]);
   if (r.Effort.Length > 0) body["reasoning_effort"] = r.Effort;
   using var res = await Post(At(root, "chat/completions"), key, body);
   var text = new StringBuilder(); var calls = new SortedDictionary<int, (string Id, string Name, StringBuilder Args)>(); long input = 0, output = 0;
@@ -520,4 +523,41 @@ public sealed class ApiRun : AgentRun
    process.Dispose();
   }
  }
+}
+
+/// Gemini through Google's Gemini API with the user's free key (aistudio.google.com/apikey). Google ended free personal
+/// sign-in for its Gemini CLI app, so Carbon's Gemini runs on Carbon's own agent loop instead, like an API provider that
+/// comes set up: the user only pastes the key, once. The key is kept like any API key (DPAPI, this Windows user only).
+static class GeminiKey
+{
+ public const string ProviderId = "api-gemini";
+ public const string KeyPage = "https://aistudio.google.com/apikey";
+ public static readonly ApiProvider Provider = new() {
+  Id = ProviderId, Kind = "openai", Name = "Gemini", Url = "https://generativelanguage.googleapis.com/v1beta/openai", Context = 1_000_000,
+  Models = [new ApiModel { Id = "gemini-flash-latest" }, new ApiModel { Id = "gemini-pro-latest" }, new ApiModel { Id = "gemini-flash-lite-latest" }],
+ };
+ public static bool Is(Uri root) => root.Host == "generativelanguage.googleapis.com";
+ static readonly HashSet<string> Words = ["type", "description", "properties", "required", "items", "enum", "format", "nullable", "minimum", "maximum", "anyOf"];
+ /// A tool's parameters in the JSON Schema words Gemini accepts; anything else is left out.
+ public static JsonNode Clean(JsonNode node)
+ {
+  if (node is JsonArray list) return new JsonArray([.. list.Select(x => x == null ? null : Clean(x))]);
+  if (node is not JsonObject o) return node.DeepClone();
+  var clean = new JsonObject();
+  foreach (var (k, v) in o) {
+   if (v == null || !Words.Contains(k)) continue;
+   if (k == "properties" && v is JsonObject props) clean["properties"] = new JsonObject(props.Where(p => p.Value != null).Select(p => KeyValuePair.Create(p.Key, (JsonNode?)Clean(p.Value!))));
+   else if (k == "type" && v is JsonArray types) { clean["type"] = types.Select(t => t?.ToString()).FirstOrDefault(t => t is { } x && x != "null") ?? "string"; if (types.Any(t => t?.ToString() == "null")) clean["nullable"] = true; }
+   else if (k == "required") { if (v is JsonArray { Count: > 0 } req) clean["required"] = req.DeepClone(); }
+   else clean[k] = Clean(v);
+  }
+  if (clean["type"]?.ToString() == "object" && clean["properties"] == null) clean["properties"] = new JsonObject();
+  return clean;
+ }
+}
+
+/// Carbon's Gemini choice: Gemini on Carbon's agent loop with the user's free key.
+sealed class GeminiKeyAdapter : ApiAdapter
+{
+ public override string[] Gaps => [];
 }

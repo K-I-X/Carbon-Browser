@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowUp, Check, CornerDownLeft, Dices, Download, FileSearch,
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { cn, fadeTop, MAC } from "@/lib/utils"
-import { AiPicker, NodeNote, SignInSteps, type AiState } from "./AiSidebar"
+import { AiPicker, GeminiKeyBox, NodeNote, SignInSteps, type AiState } from "./AiSidebar"
 import { QuickApi } from "./ApiProviders"
 import { lookOf, type Companion, type ReplyLength } from "./Buddy"
 import { useDraft } from "./drafts"
@@ -94,6 +94,7 @@ function Connect({ ai, send }: { ai: AiState; send: Send }) {
        : <small>{h.app} isn't on this computer yet, and Carbon can't install it for you. <NodeNote cmd={h.installCommand} node={ai.node} />Get it from {host(h.site)}{h.installCommand ? <> or run this in {MAC ? "Terminal" : "PowerShell"}: <code>{h.installCommand}</code></> : ""}, then check again.</small>}</span>
       {h.installer ? <Button size="sm" onClick={() => send("aiInstall")}>Install it</Button> : <Button size="sm" variant="outline" onClick={() => send("aiCheck")}>Check again</Button>}</div>
     : s === "signedOut" ? <div className="ob-status is-ask ob-signin"><SignInSteps h={h} send={send} /></div>
+    : (s === "needsKey" || s === "badKey") && h.id === "gemini" ? <div className="ob-status is-ask"><GeminiKeyBox send={send} /></div>
     : s === "needsKey" || s === "badKey" ? <p className="ob-note">{h.name} uses an API key. Add it in Settings, under Models, after setup, or pick an app you're signed in to.</p>
     : h.free ? <p className="ob-ready"><Check />Carbon AI is ready. It's free, with no account, no key and nothing to sign in to.</p>
     : h.billing ? <p className="ob-ready"><Check />{h.name} is ready. {h.billing}</p>

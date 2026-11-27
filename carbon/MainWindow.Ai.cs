@@ -218,9 +218,9 @@ public partial class MainWindow
    InstallCommand = "npm install -g @openai/codex", Site = "https://chatgpt.com", TerminalSignIn = "codex login" },
   new GrokAdapter { Id = "grok", Name = "Grok", App = "Grok Build", Command = "grok", Maker = "xAI", Installer = "https://x.ai/cli/install.ps1",
    InstallCommand = "irm https://x.ai/cli/install.ps1 | iex", Site = "https://x.ai/cli", TerminalSignIn = "grok login --device-auth" },
-  // Signed in from a terminal: Gemini CLI has no sign-in command of its own.
-  new GeminiAdapter { Id = "gemini", Name = "Gemini", App = "Gemini CLI", Command = "gemini", Maker = "Google",
-   InstallCommand = "npm install -g @google/gemini-cli", Site = "https://github.com/google-gemini/gemini-cli", TerminalSignIn = "gemini" },
+  // Gemini through Google's Gemini API with the user's free key (GeminiKey): Google ended free personal sign-in for Gemini CLI.
+  // Same id as before, so chats and companions set to Gemini keep it.
+  new GeminiKeyAdapter { Provider = GeminiKey.Provider, Id = "gemini", Name = "Gemini", App = "Gemini", Command = "", Maker = "Google", Site = GeminiKey.KeyPage },
   new OpenCodeAdapter { Id = "opencode", Name = "OpenCode", App = "OpenCode", Command = "opencode", Maker = "OpenCode",
    InstallCommand = "npm install -g opencode-ai", Site = "https://opencode.ai", Secondary = true },
   // Compatible: built from their docs and packages, tested with fake apps only. Signed in from a terminal.
@@ -600,6 +600,8 @@ public partial class MainWindow
    case "aiSetupCancel": aiSetupCancelled = true; try { aiSetupProcess?.Kill(true); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { } break;
    case "aiCheck": aiClis = null; _ = AiRecheck(B("signedIn")); break;
    case "aiToggle": aiOpen = !aiOpen; if (aiOpen) _ = CheckAis(); break;
+   case "geminiKey" when S("key").Trim() is { Length: >= 20 and <= 200 } geminiKey && !geminiKey.Any(char.IsWhiteSpace): // the free Gemini key, pasted on Gemini's row
+    ApiKeyStore.Save(GeminiKey.ProviderId, geminiKey); _ = Task.Run(async () => { await CheckAi(AiClis.First(c => c.Id == "gemini")); await Dispatcher.InvokeAsync(() => { PublishAiEverywhere(); Toast("Gemini is ready."); }); }); break;
    case "aiStatus": _ = CheckAis(); break; // Model settings or a Model tab opened: what's installed and logged in, at most every 30 s
    case "aiAsk" when S("text").Trim() is { Length: > 0 and <= 20000 } ask: // typed in the address bar: a new chat, in its own tab
     var into = active is { Url.Length: 0, ChatId: null, Private: false } blank ? blank : await NewTab("", false, false);
@@ -1557,7 +1559,7 @@ public partial class MainWindow
  static async Task CheckAi(AgentAdapter cli)
  {
   if (aiStatus.GetValueOrDefault(cli.Id) == "installing") return;
-  if (cli is ApiAdapter api) { aiStatus[cli.Id] = !ApiKeyStore.Has(api.Id) && !api.Provider.NoKey ? "needsKey" : ApiKeyStore.Refused.Contains(api.Id) ? "badKey" : "ready"; return; }
+  if (cli is ApiAdapter api) { aiStatus[cli.Id] = !ApiKeyStore.Has(api.Provider.Id) && !api.Provider.NoKey ? "needsKey" : ApiKeyStore.Refused.Contains(api.Provider.Id) ? "badKey" : "ready"; return; }
   if (FindCli(cli.Command) is not { } exe) { aiStatus[cli.Id] = "missing"; return; }
   try {
    if (await cli.Detect(exe) is bool signedIn) aiStatus[cli.Id] = signedIn ? "ready" : "signedOut";

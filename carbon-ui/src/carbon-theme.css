@@ -180,3 +180,9 @@ html[data-carbon] :is(.home-idea, .widget, .mate-card, .speed-dial-tile) { backg
 /* Still made every toast click-through (so a toast over the tab strip never blocks it), which also made its Undo,
    Resume all and Not now buttons impossible to press. The buttons take clicks again; the rest still lets clicks through. */
 [data-sonner-toast] :is([data-button], [data-cancel], button) { pointer-events: auto !important; }
+
+/* Gemini's free key box (AiSidebar.tsx GeminiKeyBox) */
+.gemini-key { display: grid; gap: 8px; font-size: 12.5px; line-height: 1.5; }
+.gemini-key p { margin: 0; color: var(--muted-foreground); } .gemini-key a { color: var(--foreground); text-decoration: underline; }
+.gemini-key input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--input); background: var(--background); color: var(--foreground); font: inherit; }
+.gemini-key small { color: var(--muted-foreground); }
