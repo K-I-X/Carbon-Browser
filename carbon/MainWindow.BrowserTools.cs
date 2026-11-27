@@ -1,0 +1,218 @@
+using System.IO;
+using System.Text.Json;
+using System.Windows;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
+namespace Carbon;
+public partial class MainWindow
+{
+ WebView2? managementView;
+ readonly Dictionary<string,(CoreWebView2Cookie Cookie,CoreWebView2CookieManager Manager)> cookieInventory=[];
+ readonly Dictionary<string,CoreWebView2BrowserExtension> extensionInventory=[];
+ string? extensionCandidatePath;
+ string? extensionManifestHash;
+ string? extensionContentHash;
+ int extensionReviewVersion;
+ bool extensionInstalling;
+ string? copiedPassword;
+ long clipboardVersion;
+ object? extensionCandidate;
+ readonly Dictionary<string,string> extensionPages=[];
+ void ApplyProtection(CoreWebView2 core)
+ {
+  core.Settings.AreHostObjectsAllowed=false;
+  core.Settings.IsReputationCheckingRequired=true;
+  core.Profile.PreferredTrackingPreventionLevel=Enum.Parse<CoreWebView2TrackingPreventionLevel>(Prefs.Tracking);
+  core.Settings.IsGeneralAutofillEnabled=Prefs.Autofill;
+  // Saved logins use Carbon's Windows-protected vault, with explicit per-origin filling.
+  core.Settings.IsPasswordAutosaveEnabled=false;
+ }
+ async Task UpdateFavicon(BrowserTab tab,CoreWebView2 core)
+ {
+  try{string page=core.Source;using var source=await core.GetFaviconAsync(CoreWebView2FaviconImageFormat.Png);if(source==null||tab.Closed)return;using var data=new MemoryStream();await source.CopyToAsync(data);if(core.Source==page&&tab.View?.CoreWebView2==core&&data.Length is >0 and <131072){tab.Favicon="data:image/png;base64,"+Convert.ToBase64String(data.ToArray());SaveLater();
+   // Bookmarks for this site pick up its icon (regular tabs only).
+   if(!tab.Private)foreach(var b in state.Bookmarks)if(Host(b.Url)==Host(page)&&b.Favicon!=tab.Favicon){b.Favicon=tab.Favicon;ShellPublish();}}}catch(Exception){/* A missing or cancelled favicon uses the globe fallback. */}
+ }
+ /// Settings → Clear the companion profile: companions are signed out everywhere; the user's own profile is untouched.
+ async Task ClearCompanionData()
+ {
+  var view = new WebView2 { Visibility = Visibility.Hidden }; WebHost.Children.Add(view);
+  try {
+   var env = await App.BrowserEnvironment; var options = env.CreateCoreWebView2ControllerOptions(); options.ProfileName = CompanionEngine;
+   await view.EnsureCoreWebView2Async(env, options);
+   await view.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.AllProfile);
+   Toast("Companion profile cleared. Companions are signed out of every site there.");
+  } catch (Exception ex) { App.Log(ex); Toast("Couldn't clear the companion profile."); }
+  finally { WebHost.Children.Remove(view); view.Dispose(); }
+ }
+ async Task<CoreWebView2> ManagementCore()
+ {
+  if(tabs.FirstOrDefault(t=>!t.Private&&t.Engine==null&&t.View?.CoreWebView2!=null)?.View?.CoreWebView2 is {} ready)return ready; // the user's own profile, never the companion's
+  if(managementView?.CoreWebView2 is {} existing)return existing;
+  managementView=new WebView2{Visibility=Visibility.Hidden};WebHost.Children.Add(managementView);
+  var env=await App.BrowserEnvironment;var options=env.CreateCoreWebView2ControllerOptions();options.ProfileName="Default";
+  await managementView.EnsureCoreWebView2Async(env,options);ApplyProtection(managementView.CoreWebView2);ApplyMemoryPolicy();return managementView.CoreWebView2;
+ }
+ async Task PublishBrowserTools(string name)
+ {
+  try{
+   object data=new{};
+   if(name=="passwords")data=PasswordsData();
+   if(name=="profiles")data=ProfileData();
+   if(name=="site")data=await SitePermissionData();
+   if(name=="import"){DiscoverExternalProfiles();data=ImportData();}
+   if(name=="cookies"){
+    var core=active?.View?.CoreWebView2??await ManagementCore();var manager=core.CookieManager;
+    var cookies=await manager.GetCookiesAsync("");cookieInventory.Clear();
+    foreach(var cookie in cookies.OrderBy(c=>c.Domain).ThenBy(c=>c.Name).Take(2000))cookieInventory[Guid.NewGuid().ToString("N")]=(cookie,manager);
+    data=new{isPrivate=active?.Private==true,cookies=cookieInventory.Select(k=>new{id=k.Key,name=k.Value.Cookie.Name,domain=k.Value.Cookie.Domain,path=k.Value.Cookie.Path,secure=k.Value.Cookie.IsSecure,httpOnly=k.Value.Cookie.IsHttpOnly,session=k.Value.Cookie.IsSession})};
+   }
+   if(name=="extensions"){
+    var core=await ManagementCore();extensionInventory.Clear();foreach(var extension in await core.Profile.GetBrowserExtensionsAsync())
+     // The runtime also returns internal PDF/clipboard extensions. Only expose
+     // user-installed extensions here, not engine components.
+     if(File.Exists(Path.Combine(App.DataRoot,"Extensions",extension.Id+".path")))extensionInventory[extension.Id]=extension;
+    data=new{extensions=extensionInventory.Values.Select(e=>new{id=e.Id,name=e.Name,enabled=e.IsEnabled,hasPage=GetExtensionPage(e.Id)!=null,hasPopup=GetExtensionPage(e.Id,true)!=null,icon=ExtensionIcon(e.Id)}),candidate=extensionCandidate,downloading=extensionDownload};
+   }
+   if(name=="security"){
+    var core=active?.View?.CoreWebView2??await ManagementCore();var permissions=await core.Profile.GetNonDefaultPermissionSettingsAsync();
+    data=new{tracking=core.Profile.PreferredTrackingPreventionLevel.ToString(),reputationRequested=core.Settings.IsReputationCheckingRequired,permissions=permissions.Select(p=>new{origin=p.PermissionOrigin,kind=p.PermissionKind.ToString(),state=p.PermissionState.ToString()})
+     .Concat(Prefs.SitePermissions.SelectMany(s=>s.Value.Where(r=>r.Key!="Autoplay").Select(r=>new{origin=s.Key,kind=r.Key,state=r.Value}))),engine=core.Environment.BrowserVersionString};
+   }
+   ShellSend(new{kind="tools",name,data});
+  }catch(Exception ex){ShellSend(new{kind="tools",name,data=new{error=ex.Message}});}
+ }
+ async Task HandleBrowserTool(string op,JsonElement data)
+ {
+  string S(string key)=>data.TryGetProperty(key,out var v)?v.GetString()??"":"";
+  switch(op){
+   case "profileCreate":await ProfileCatalog.Create(S("name"));await PublishBrowserTools("profiles");break;
+   case "profileOpen":OpenBrowserProfile(S("id"));break;
+   case "profileLaunch":ProfileCatalog.SetLaunch(S("id"));await PublishBrowserTools("profiles");break;
+   case "profileDelete":{string id=S("id");_ = Dispatcher.BeginInvoke(()=>ConfirmProfileRemoval(id,false));break;}
+   case "profileResetDefault":_ = Dispatcher.BeginInvoke(()=>ConfirmProfileRemoval("default",true));break;
+   case "importChoose":ChooseImport(S("kind"));break;
+   case "externalChoose":ChooseExternalProfile();break;
+   case "externalReview":if(externalSources.TryGetValue(S("id"),out var source))await PrepareExternalProfile(source.Path,source.Name);break;
+   case "externalCancel":if(!externalImportBusy){externalImport?.Dispose();externalImport=null;externalImportError="";await PublishBrowserTools("import");}break;
+   case "externalCloseSource":await CloseSourceAndRetry();break;
+   case "externalConfirm":{bool B(string k)=>data.TryGetProperty(k,out var v)&&v.ValueKind==JsonValueKind.True;await CompleteExternalProfile(S("id"),B("bookmarks"),B("history"),B("passwords"),B("cookies"),B("autofill"));break;}
+   case "importConfirm":await CompleteImport(S("id"),data.TryGetProperty("replace",out var replace)&&replace.GetBoolean());break;
+   case "importCancel":importBatch=null;await PublishBrowserTools("import");break;
+   case "exportData":ExportBrowserData();break;
+   case "storeExtension":await PrepareStoreExtension(active?.Url??"");break;
+   case "openStore":await NewTab("https://chromewebstore.google.com/",false,false);break;
+   case "loginAccept":case "loginNever":case "loginDismiss":case "neverRemove":case "passwordPermission":case "vaultReveal":case "vaultEdit":case "vaultCopy":case "vaultSave":case "vaultDelete":case "vaultFill":case "vaultExport":await HandlePasswordTool(op,data);break;
+   case "refreshTools":await PublishBrowserTools(S("name"));break;
+   case "vaultGenerate":ShellSend(new{kind="vaultGenerated",password=Vault.Generate()});break;
+   case "cookieDelete":if(cookieInventory.TryGetValue(S("id"),out var cookie)){await DeleteStoredCookie(cookie.Cookie,cookie.Manager);await PublishBrowserTools("cookies");}break;
+   case "cookieDeleteDomain":foreach(var item in cookieInventory.Values.Where(v=>v.Cookie.Domain==S("domain")).ToArray())await DeleteStoredCookie(item.Cookie,item.Manager);await PublishBrowserTools("cookies");break;
+   case "permissionReset":{
+    var core=active?.View?.CoreWebView2??await ManagementCore();if(S("kind")!="Popups"&&Enum.TryParse<CoreWebView2PermissionKind>(S("kind"),out var kind))await core.Profile.SetPermissionStateAsync(kind,S("origin"),CoreWebView2PermissionState.Default);
+    if(Prefs.SitePermissions.TryGetValue(S("origin").TrimEnd('/'),out var rules)){rules.Remove(S("kind"));if(rules.Count==0)Prefs.SitePermissions.Remove(S("origin").TrimEnd('/'));SaveLater();await ApplySiteRules(false);}
+    await PublishBrowserTools("security");break;
+   }
+   case "sitePermission":if(active!=null){await SetSitePermission(active,S("kind"),S("state"));await PublishBrowserTools("site");}break;
+   case "sitePermissionsReset":if(active!=null){await ResetSitePermissions(active);await PublishBrowserTools("site");}break;
+   case "extensionChoose":_ = Dispatcher.BeginInvoke(async()=>{var folder=new OpenFolderDialog{Title="Choose an unpacked extension folder"};if(folder.ShowDialog(this)==true)try{await StageExtension(folder.FolderName);}catch(Exception ex){Toast(ex.Message);}});break;
+   case "extensionCancel":extensionCandidate=null;extensionCandidatePath=null;await PublishBrowserTools("extensions");break;
+   case "extensionInstall":if(!extensionInstalling){extensionInstalling=true;try{await InstallExtension();}catch(IOException ex){Toast(ex.Message);}finally{extensionInstalling=false;}}break;
+   case "extensionToggle":if(extensionInventory.TryGetValue(S("id"),out var toggle)){await toggle.EnableAsync(!toggle.IsEnabled);await PublishBrowserTools("extensions");}break;
+   case "extensionAction":await ExtensionAction(S("id"),data.TryGetProperty("anchor",out var at)&&at.ValueKind==JsonValueKind.Array?at.EnumerateArray().Select(v=>v.GetDouble()).ToArray():null);break;
+   case "extensionPin":{string pin=S("id");if(!Prefs.PinnedExtensions.Remove(pin)&&ExtensionFolder(pin)!=null)Prefs.PinnedExtensions.Add(pin);SaveLater();break;}
+   case "sidePanelClose":CloseSidePanel();break;
+   case "sidePanelBounds":{double ratio=data.TryGetProperty("viewportWidth",out var vw)&&vw.GetDouble()>0&&shellView!=null?shellView.ActualWidth/vw.GetDouble():1;PlaceSidePanel(data.GetProperty("x").GetDouble()*ratio,data.GetProperty("y").GetDouble()*ratio,data.GetProperty("width").GetDouble()*ratio,data.GetProperty("height").GetDouble()*ratio);break;}
+   case "extensionRemove":if(extensionInventory.TryGetValue(S("id"),out var remove)){if(sidePanelExtension==remove.Id)CloseSidePanel();Prefs.PinnedExtensions.Remove(remove.Id);ExtensionIcons.Remove(remove.Id);SaveLater();await remove.RemoveAsync();extensionPages.Remove(remove.Id+":page");extensionPages.Remove(remove.Id+":popup");await PublishBrowserTools("extensions");}break;
+   case "extensionPage":if(extensionInventory.ContainsKey(S("id"))&&GetExtensionPage(S("id")) is{} entryPage)await NewTab(entryPage,false,false);break;
+   case "extensionPopup":if(extensionInventory.ContainsKey(S("id"))&&GetExtensionPage(S("id"),true) is{} popupPage)await ShowExtensionPopup(popupPage,data.TryGetProperty("anchor",out var anchor)&&anchor.ValueKind==JsonValueKind.Array?anchor.EnumerateArray().Select(v=>v.GetDouble()).ToArray():null);break;
+   case "extensionMenu":await PublishBrowserTools("extensions");break;
+   case "bookmarkEdit":{
+    var bookmark=state.Bookmarks.FirstOrDefault(b=>b.Url==S("oldUrl"));if(bookmark!=null&&Uri.TryCreate(S("url"),UriKind.Absolute,out var u)&&u.Scheme is "http" or "https"){bookmark.Title=S("title").Trim();bookmark.Url=u.AbsoluteUri;SaveLater();}break;
+   }
+  }
+ }
+ async Task DeleteStoredCookie(CoreWebView2Cookie cookie,CoreWebView2CookieManager manager)
+ {
+  manager.DeleteCookie(cookie);
+  // DeleteCookie queues work in the browser process. Wait for the store to
+  // acknowledge it before republishing the list, otherwise a deleted row reappears.
+  for(int attempt=0;attempt<10;attempt++){
+   await Task.Delay(40);
+   var remaining=await manager.GetCookiesAsync("");
+   if(!remaining.Any(c=>c.Name==cookie.Name&&c.Domain==cookie.Domain&&c.Path==cookie.Path))return;
+  }
+ }
+ async Task ClearPasswordClipboard(string password,long version)
+ {
+  await Task.Delay(30000);if(closing||version!=clipboardVersion)return;
+  try{if(Clipboard.ContainsText()&&Clipboard.GetText()==password)Clipboard.Clear();}catch(Exception){}finally{copiedPassword=null;}
+ }
+ void ClearOwnedPasswordClipboard()
+ {
+  try{if(copiedPassword!=null&&Clipboard.ContainsText()&&Clipboard.GetText()==copiedPassword)Clipboard.Clear();}catch(Exception){}finally{copiedPassword=null;}
+ }
+ async Task StageExtension(string folder)
+ {
+  if(extensionInstalling)throw new InvalidOperationException("Wait for the current extension installation to finish.");
+  int review=++extensionReviewVersion;
+  var path=Path.GetFullPath(folder);string manifestPath=Path.Combine(path,"manifest.json");if(new FileInfo(manifestPath).Length>1024*1024)throw new IOException("The extension manifest is too large.");
+  byte[] manifestBytes=await File.ReadAllBytesAsync(manifestPath);using var manifest=JsonDocument.Parse(manifestBytes);
+  var root=manifest.RootElement;string name=ExtensionName(root,path);var permissions=new List<string>();
+  if(root.TryGetProperty("background",out var background)&&background.ValueKind==JsonValueKind.Object&&background.TryGetProperty("service_worker",out var worker))InsideExtension(path,worker.ValueKind==JsonValueKind.String?worker.GetString()!:"");
+  foreach(string key in new[]{"permissions","host_permissions","optional_permissions","optional_host_permissions"})if(root.TryGetProperty(key,out var list))permissions.AddRange(list.EnumerateArray().Select(v=>v.GetString()??""));
+  if(root.TryGetProperty("content_scripts",out var scripts))foreach(var script in scripts.EnumerateArray())if(script.TryGetProperty("matches",out var matches))permissions.AddRange(matches.EnumerateArray().Select(v=>v.GetString()??""));
+  string contentHash=await Task.Run(()=>ExtensionTreeHash(path));
+  if(review!=extensionReviewVersion)return;
+  extensionCandidatePath=path;extensionContentHash=contentHash;extensionManifestHash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(manifestBytes));extensionCandidate=new{name,permissions=permissions.Distinct().ToArray(),desktopCompanion=permissions.Contains("nativeMessaging")};await PublishBrowserTools("extensions");
+ }
+ static string ExtensionTreeHash(string folder)
+ {
+  using var digest=System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+  var dirs=new Queue<string>();dirs.Enqueue(folder);var files=new List<string>();long total=0;
+  while(dirs.Count>0){string directory=dirs.Dequeue();if((File.GetAttributes(directory)&FileAttributes.ReparsePoint)!=0)throw new IOException("Extension folders cannot contain links.");foreach(var file in Directory.EnumerateFileSystemEntries(directory)){
+   var attributes=File.GetAttributes(file);if((attributes&FileAttributes.ReparsePoint)!=0)throw new IOException("Extension folders cannot contain links.");
+   if((attributes&FileAttributes.Directory)!=0)dirs.Enqueue(file);else{files.Add(file);total+=new FileInfo(file).Length;if(files.Count>20000||total>200*1024*1024)throw new IOException("Extension is too large.");}
+  }}
+  foreach(var file in files.OrderBy(f=>Path.GetRelativePath(folder,f),StringComparer.Ordinal)){
+   digest.AppendData(System.Text.Encoding.UTF8.GetBytes(Path.GetRelativePath(folder,file)));digest.AppendData([0]);
+   using var stream=File.OpenRead(file);digest.AppendData(System.Security.Cryptography.SHA256.HashData(stream));
+  }
+  return Convert.ToHexString(digest.GetHashAndReset());
+ }
+ async Task InstallExtension()
+ {
+  if(extensionCandidatePath==null)return;
+  string source=extensionCandidatePath,destination=Path.Combine(App.DataRoot,"Extensions",Guid.NewGuid().ToString("N"));
+  string? expectedManifest=extensionManifestHash;
+  string? expectedContent=extensionContentHash;
+  await Task.Run(()=>{
+   var dirs=new Queue<string>();dirs.Enqueue(source);long total=0;int count=0;var files=new List<(string Source,string Relative)>();
+   while(dirs.Count>0){string current=dirs.Dequeue();if((File.GetAttributes(current)&FileAttributes.ReparsePoint)!=0)throw new IOException("Extension folders cannot contain links.");foreach(var path in Directory.EnumerateFileSystemEntries(current)){var attr=File.GetAttributes(path);if((attr&FileAttributes.ReparsePoint)!=0)throw new IOException("Extension folders cannot contain links.");if((attr&FileAttributes.Directory)!=0)dirs.Enqueue(path);else{total+=new FileInfo(path).Length;if(++count>20000||total>200*1024*1024)throw new IOException("Extension folder exceeds 200 MB or 20,000 files.");files.Add((path,Path.GetRelativePath(source,path)));}}}
+   foreach(var file in files){string target=Path.GetFullPath(Path.Combine(destination,file.Relative));if(!target.StartsWith(destination+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))throw new IOException("Invalid extension path.");Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(file.Source,target);}
+  });
+  if(expectedManifest==null||Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(destination,"manifest.json"))))!=expectedManifest)throw new IOException("The extension permissions changed. Choose the folder again to review them.");
+  if(expectedContent==null||await Task.Run(()=>ExtensionTreeHash(destination))!=expectedContent)throw new IOException("The extension files changed after review. Review the extension again.");
+  var core=await ManagementCore();
+  try{PatchExtension(destination);}
+  catch(InvalidDataException ex){Directory.Delete(destination,true);throw new IOException(ex.Message);} // never installed half adapted
+  catch(Exception ex)when(ex is IOException or System.Text.Json.JsonException){App.Log(ex);}
+  var installed=await core.Profile.AddBrowserExtensionAsync(destination);ExtensionIcons.Remove(installed.Id);
+  extensionPages.Remove(installed.Id+":page");extensionPages.Remove(installed.Id+":popup");
+  File.WriteAllText(Path.Combine(destination,"..",installed.Id+".path"),destination);
+  extensionCandidate=null;extensionCandidatePath=null;await PublishBrowserTools("extensions");Toast("Extension added. Reload open pages to use it.");
+ }
+ string? GetExtensionPage(string id,bool popupOnly=false)
+ {
+  try{
+   var cacheKey=id+(popupOnly?":popup":":page");
+   if(extensionPages.TryGetValue(cacheKey,out var cached))return cached;
+   var folder=File.ReadAllText(Path.Combine(App.DataRoot,"Extensions",id+".path"));using var json=JsonDocument.Parse(File.ReadAllText(Path.Combine(folder,"manifest.json")));var m=json.RootElement;string? page=null;
+   if(!popupOnly&&m.TryGetProperty("options_page",out var option))page=option.GetString();
+   else if(!popupOnly&&m.TryGetProperty("options_ui",out var options)&&options.TryGetProperty("page",out var op))page=op.GetString();
+   if(popupOnly)foreach(var key in new[]{"action","browser_action","page_action"})if(m.TryGetProperty(key,out var action)&&action.TryGetProperty("default_popup",out var popup)){page=popup.GetString();break;}
+   if(page!=null&&!page.Contains("..")&&!page.Contains(':')&&!page.Contains('\\'))return extensionPages[cacheKey]="chrome-extension://"+id+"/"+page.TrimStart('/');
+  }catch(Exception){}
+  return null;
+ }
+}

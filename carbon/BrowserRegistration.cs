@@ -1,0 +1,139 @@
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using Microsoft.Win32;
+namespace Carbon;
+
+// Per-user registration as a Windows web browser (HKCU only, no elevation). Windows never lets an
+// app silently make itself the default browser: the user picks Carbon in Settings > Default apps.
+internal static class BrowserRegistration
+{
+ const string Client = @"Software\Clients\StartMenuInternet\Carbon";
+ const string UrlProgId = "CarbonURL", HtmlProgId = "CarbonHTML";
+ static string Exe => Environment.ProcessPath!;
+ // Links go to the tiny CarbonOpen.exe next to Carbon.exe when it is installed: it hands a link to the open window without starting this 160 MB app.
+ static string Handler => Path.Combine(Path.GetDirectoryName(Exe)!, "CarbonOpen.exe") is var h && File.Exists(h) ? h : Exe;
+ static string Open => "\"" + Handler + "\" " + (Handler == Exe ? "--link " : "") + "\"%1\"";
+ public static string LinkPipe => "Carbon-links-" + Environment.UserName;
+
+ public static void Register()
+ {
+  if (App.IsQa) return;
+  // Never let a second copy (dev build, portable exe) steal link handling from a working install.
+  using (var current = Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + UrlProgId + @"\shell\open\command")) {
+   if (current?.GetValue("") is string cmd && cmd.StartsWith('"') && cmd.IndexOf('"', 1) is var end and > 1) {
+    string registered = cmd[1..end];
+    if (!string.Equals(registered, Exe, StringComparison.OrdinalIgnoreCase) && !string.Equals(registered, Handler, StringComparison.OrdinalIgnoreCase) && File.Exists(registered)) return;
+   }
+  }
+  try {
+   foreach (var (id, name) in new[] { (UrlProgId, "Carbon URL"), (HtmlProgId, "Carbon HTML Document") }) {
+    using var k = Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + id);
+    k.SetValue("", name); k.SetValue("FriendlyTypeName", name);
+    if (id == UrlProgId) k.SetValue("URL Protocol", "");
+    using (var i = k.CreateSubKey("DefaultIcon")) i.SetValue("", "\"" + Exe + "\",0");
+    using (var a = k.CreateSubKey("Application")) { a.SetValue("ApplicationName", "Carbon"); a.SetValue("ApplicationIcon", "\"" + Exe + "\",0"); a.SetValue("ApplicationCompany", "Carbon"); }
+    using var c = k.CreateSubKey(@"shell\open\command"); c.SetValue("", Open);
+   }
+   using (var k = Registry.CurrentUser.CreateSubKey(Client)) {
+    k.SetValue("", "Carbon");
+    using (var i = k.CreateSubKey("DefaultIcon")) i.SetValue("", "\"" + Exe + "\",0");
+    using (var c = k.CreateSubKey(@"shell\open\command")) c.SetValue("", "\"" + Exe + "\"");
+    using var cap = k.CreateSubKey("Capabilities");
+    cap.SetValue("ApplicationName", "Carbon");
+    cap.SetValue("ApplicationDescription", "The browser you share with your AI.");
+    cap.SetValue("ApplicationIcon", "\"" + Exe + "\",0");
+    using (var s = cap.CreateSubKey("StartMenu")) s.SetValue("StartMenuInternet", "Carbon");
+    using (var u = cap.CreateSubKey("URLAssociations")) { u.SetValue("http", UrlProgId); u.SetValue("https", UrlProgId); }
+    using var f = cap.CreateSubKey("FileAssociations");
+    foreach (var ext in new[] { ".htm", ".html", ".shtml", ".xht", ".xhtml", ".svg", ".webp", ".pdf" }) f.SetValue(ext, HtmlProgId);
+   }
+   using (var r = Registry.CurrentUser.CreateSubKey(@"Software\RegisteredApplications")) r.SetValue("Carbon", Client + @"\Capabilities");
+   // Let Explorer "Open with" list Carbon for web files.
+   using (var app = Registry.CurrentUser.CreateSubKey(@"Software\Classes\Applications\" + Path.GetFileName(Exe) + @"\shell\open\command")) app.SetValue("", Open);
+  } catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException) { App.Log(ex); }
+ }
+
+ public static bool IsDefault
+ {
+  get {
+   using var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice");
+   return k?.GetValue("ProgId") as string == UrlProgId;
+  }
+ }
+
+ // Opens Windows' Default apps page scrolled to Carbon, where the user confirms the choice.
+ public static void OpenDefaultAppsSettings()
+ {
+  try { Process.Start(new ProcessStartInfo("ms-settings:defaultapps?registeredAppUser=Carbon") { UseShellExecute = true }); }
+  catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { Process.Start(new ProcessStartInfo("ms-settings:defaultapps") { UseShellExecute = true }); }
+ }
+
+ // ---- Single-instance hand-off: a second Carbon launch (e.g. a clicked link) forwards its URL. ----
+ static string PipeName(string instance) => instance.Replace("Local\\", "") + "-open";
+
+ public static string? UrlFromArgs(string[] args)
+ {
+  for (int i = 0; i < args.Length; i++) {
+   var a = args[i];
+   if (a is "--profile" or "--profiles-root") { i++; continue; }
+   if (a.StartsWith("--")) continue;
+   if (Uri.TryCreate(a, UriKind.Absolute, out var u) && u.Scheme is "http" or "https") return u.AbsoluteUri;
+   try { if (File.Exists(a)) return new Uri(Path.GetFullPath(a)).AbsoluteUri; } catch (Exception) { }
+  }
+  return null;
+ }
+
+ public static bool Forward(string instance, string? url)
+ {
+  try {
+   using var pipe = new NamedPipeClientStream(".", PipeName(instance), PipeDirection.Out, PipeOptions.CurrentUserOnly);
+   pipe.Connect(3000);
+   var bytes = Encoding.UTF8.GetBytes(url ?? ""); pipe.Write(bytes); pipe.Flush(); return true;
+  } catch (Exception ex) when (ex is TimeoutException or IOException or UnauthorizedAccessException) { return false; }
+ }
+
+ public static IDisposable Listen(string instance, Action<string> onUrl) => new LinkListener(PipeName(instance), onUrl);
+ // CarbonOpen.exe hands clicked links to the launch profile on this fixed per-user pipe.
+ public static IDisposable ListenForLauncher(Action<string> onUrl) => new LinkListener(LinkPipe, onUrl);
+
+ sealed class LinkListener : IDisposable
+ {
+  const int MaximumBytes = 16384;
+  readonly CancellationTokenSource stop = new();
+  public LinkListener(string name, Action<string> onUrl)
+  {
+   // Create the first pipe synchronously, before a second launch can find the instance mutex.
+   _ = Run(new NamedPipeServerStream(name, PipeDirection.In, 1, PipeTransmissionMode.Byte,
+    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly), name, onUrl);
+  }
+  async Task Run(NamedPipeServerStream first, string name, Action<string> onUrl)
+  {
+   NamedPipeServerStream? next = first;
+   while (!stop.IsCancellationRequested) {
+    try {
+     using var pipe = next ?? new NamedPipeServerStream(name, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+     next = null;
+     await pipe.WaitForConnectionAsync(stop.Token).ConfigureAwait(false);
+     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+     deadline.CancelAfter(TimeSpan.FromSeconds(3));
+     using var ms = new MemoryStream(); var buf = new byte[4096]; int n;
+     while ((n = await pipe.ReadAsync(buf, deadline.Token).ConfigureAwait(false)) > 0) {
+      if (ms.Length + n > MaximumBytes) break;
+      ms.Write(buf, 0, n);
+     }
+     if (n > 0) continue; // oversized requests are refused, never truncated into a different URL
+     var text = Encoding.UTF8.GetString(ms.ToArray());
+     // Accept only a web or file URL (or empty = just bring the window forward).
+     if (text.Length == 0 || Uri.TryCreate(text, UriKind.Absolute, out var u) && u.Scheme is "http" or "https" or "file") onUrl(text);
+    } catch (OperationCanceledException) { if (stop.IsCancellationRequested) break; }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException) {
+     if (stop.IsCancellationRequested) break;
+     await Task.Delay(200).ConfigureAwait(false);
+    }
+   }
+  }
+  public void Dispose() => stop.Cancel();
+ }
+}

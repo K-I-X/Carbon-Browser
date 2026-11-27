@@ -1,0 +1,104 @@
+name: Mac
+
+on:
+  push:
+    branches: [main]
+    paths: ["mac/**", "carbon/Shell/**", "carbon/Assets/**", "carbon/MainWindow.Actions.cs", "carbon/MainWindow.Agents.cs", "carbon/MainWindow.Lookup.cs", "carbon/MainWindow.Drafts.cs", "carbon/Carbon.csproj", ".github/workflows/mac.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, sign and attach again (empty builds main and attaches nothing)
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15 # macos-14 is retired on 2026-11-02
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - run: sh mac/build.sh && cp mac/build/Carbon-*.dmg mac/build/Carbon-mac.dmg
+      - name: Import test
+        run: |
+          mkdir -p /tmp/profile
+          echo '{"roots":{"bookmark_bar":{"type":"folder","children":[{"type":"url","name":"Example","url":"https://example.com/"},{"type":"folder","children":[{"type":"url","name":"Wiki","url":"https://wikipedia.org/"}]}]}}}' > /tmp/profile/Bookmarks
+          sqlite3 /tmp/profile/History "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_time INTEGER, hidden INTEGER DEFAULT 0); INSERT INTO urls(url, title, last_visit_time) VALUES ('https://example.com/', 'Example', 13400000000000000);"
+          out=$(mac/build/Carbon.app/Contents/MacOS/Carbon --read-profile /tmp/profile)
+          echo "$out"
+          test "$out" = "2 1 2025-08-18T14:13:20Z"
+      - name: Smoke test
+        run: |
+          mkdir -p ~/Library/Application\ Support/Carbon
+          echo '{"Welcome":false,"Preferences":{"AgentsEnabled":true,"ApprovedAgents":["CI"]},"ActiveId":"g","Tabs":[{"Id":"w","Title":"Wikipedia","Url":"https://en.wikipedia.org/wiki/Minimalism"},{"Id":"g","Title":"GitHub","Url":"https://github.com/K-I-X/Carbon-Browser"}]}' > ~/Library/Application\ Support/Carbon/state.json
+          open "$PWD/mac/build/Carbon.app"
+          sleep 12
+          screencapture -x mac/build/smoke-start.png
+          open -a "$PWD/mac/build/Carbon.app" https://en.wikipedia.org/wiki/Minimalism
+          sleep 12
+          screencapture -x mac/build/smoke.png
+          pgrep -x Carbon
+      - name: Agent test
+        continue-on-error: true
+        run: |
+          carbon=mac/build/Carbon.app/Contents/MacOS/Carbon
+          $carbon --cli help | tee /dev/stderr | grep -q read_page
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | $carbon --mcp | grep -q upload_file
+          $carbon --cli list_tabs as=CI
+          $carbon --cli read_page as=CI text=false
+          $carbon --cli open_tab as=CI url=https://example.com
+          $carbon --cli find as=CI text=example
+          shot=$($carbon --cli screenshot as=CI) && cp "$shot" mac/build/smoke-agent.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Carbon-mac
+          path: |
+            mac/build/Carbon-mac.dmg
+            mac/build/Carbon-mac.zip
+            mac/build/smoke*.png
+      - name: Sign the update and write the appcast
+        if: github.event_name == 'release' || inputs.tag != ''
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          # Sparkle's own tools, from its release, checked. The app only installs a zip this key signed (SUPublicEDKey).
+          curl -sfL -o "$RUNNER_TEMP/sparkle.tar.xz" https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz
+          echo "1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c
+          mkdir -p "$RUNNER_TEMP/sparkle" && tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+          plist=mac/build/Carbon.app/Contents/Info.plist
+          short=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" $plist)
+          build=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" $plist)
+          test "v$short" = "$TAG"
+          signature=$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - mac/build/Carbon-mac.zip)
+          echo "$signature" | grep -q 'sparkle:edSignature="'
+          cat > mac/build/appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+           <channel>
+            <title>Carbon</title>
+            <item>
+             <title>Carbon $short</title>
+             <pubDate>$(date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+             <sparkle:version>$build</sparkle:version>
+             <sparkle:shortVersionString>$short</sparkle:shortVersionString>
+             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+             <sparkle:fullReleaseNotesLink>https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG</sparkle:fullReleaseNotesLink>
+             <enclosure url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Carbon-mac.zip" type="application/octet-stream" $signature/>
+            </item>
+           </channel>
+          </rss>
+          EOF
+          cat mac/build/appcast.xml
+      - name: Attach to the release
+        if: github.event_name == 'release' || inputs.tag != ''
+        run: gh release upload "$TAG" mac/build/Carbon-mac.dmg mac/build/Carbon-mac.zip mac/build/appcast.xml --clobber --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}

@@ -1,0 +1,289 @@
+using System.IO;
+using System.IO.Pipes;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+namespace Carbon;
+
+// `Carbon.exe --mcp`: a Model Context Protocol server over stdio (JSON-RPC, one message per line).
+// AI apps launch it; it forwards tool calls to the running Carbon over a current-user-only pipe.
+internal static class McpServer
+{
+ internal static readonly object[] BrowserTools = [
+  Tool("list_tabs", "List the open tabs (never private ones) with their tabIds. `yours` marks the tab you're working in.", new { }),
+  Tool("web_search", "Search the web and get the results (title, URL, snippet) without opening a tab. Start here for questions and research; open a tab only to click, type, sign in or show the user something.", new { query = Str("What to search for"), count = Num("How many results, up to 10 (default 8)") }, "query"),
+  Tool("read_attachment", "Read a file the user attached to their message, by the id Carbon gave you: text and code come back as text, a page at a time (pass next as offset for more), PDFs as their text, images as the image itself.", new { id = Str("The attachment's id"), offset = Num("Text position to continue from, for long files") }, "id"),
+  Tool("list_files", "List what's in the working folder the user gave you, or a folder in it: folders end with /, files show their size.", new { path = Str("A folder in the working folder, like src (default: the working folder itself)") }),
+  Tool("read_file", "Read a file in the working folder: text and code a page at a time (pass next as offset for more), PDFs as their text, images as the image itself.", new { path = Str("The file's path in the working folder, like notes/todo.md"), offset = Num("Position to continue from, for long files") }, "path"),
+  Tool("write_file", "Create a file in the working folder, or replace a whole one (folders on the way are made). Replacing a file you didn't make in this chat may ask the user first.", new { path = Str("The file's path in the working folder"), content = Str("The whole file") }, "path", "content"),
+  Tool("edit_file", "Change part of a file in the working folder: old is the exact text to replace (it must be there once, unless all is true) and new goes in its place.", new { path = Str("The file's path in the working folder"), old = Str("The exact text to replace, as read_file shows it"), @new = Str("The text to put in its place"), all = Bool("Replace every place old is") }, "path", "old", "new"),
+  Tool("delete_file", "Delete a file in the working folder. It goes to the Recycle Bin (the Trash on a Mac), and Carbon asks the user first unless you made the file in this chat.", new { path = Str("The file's path in the working folder") }, "path"),
+  Tool("read_url", "Read a web page's main text without opening a tab (12000 characters at a time). For pages you only need to read; use open_tab when you have to click or type there. It reads signed out (the reply says signedOut) unless the user named the site or you've used it in this chat; open_tab it to see it signed in.", new { url = Str("The page's URL"), offset = Num("Text position to continue from, for long pages") }, "url"),
+  Tool("open_tab", "Open a URL or search terms in a new tab and work there from now on, to click, type or sign in. The user keeps their own tab and can keep browsing. Start most hands-on tasks here.", new { url = Str("URL or search terms"), background = Bool("true (the default in Carbon's chat): your own tab, kept out of the user's tab strip. false: open it among the user's tabs, only when they asked for it there") }, "url"),
+  Tool("navigate", "Load a URL or search terms in your current tab (or tabId).", new { url = Str("URL or search terms"), tabId = Str("Tab id (optional)") }, "url"),
+  Tool("switch_tab", "Work in another tab from now on. It stays in the background unless show is true.", new { tabId = Str("Tab id from list_tabs"), show = Bool("Bring it to the front (only when the user asked to see it)") }, "tabId"),
+  Tool("close_tab", "Close your current tab (or tabId).", new { tabId = Str("Tab id (optional)") }),
+  Tool("go_back", "Go back in your tab's history.", new { tabId = Str("Tab id (optional)") }),
+  Tool("go_forward", "Go forward in your tab's history.", new { tabId = Str("Tab id (optional)") }),
+  Tool("reload", "Reload your tab.", new { tabId = Str("Tab id (optional)") }),
+  Tool("read_page", "See the page: title, URL and scroll position, then one line per button, link and field near the visible part as [id] kind \"label\" (→ link, =value, {options}, ✓/☐ checked), then the page text (8000 characters at a time). An id keeps working as long as its element is on the page.", new { text = Bool("Include the page text (default true). false = controls only, far fewer tokens"), all = Bool("List controls on the whole page, not just near the visible part"), offset = Num("Text position to continue from, for long pages"), tabId = Str("Tab id (optional)") }),
+  Tool("find", "Search the page for text: the buttons, links and fields that match (with ids) and the matching lines of text, from anywhere on the page. Much cheaper than read_page on a big page.", new { text = Str("Text to look for"), tabId = Str("Tab id (optional)") }, "text"),
+  Tool("click", "Click an element like a real mouse click (it's scrolled into view first). Says where you ended up, and whether a new tab, dialog or file picker opened.", new { id = Str("Element id from read_page or find"), text = Str("Or: visible text of the button or link"), selector = Str("Or: CSS selector"), tabId = Str("Tab id (optional)") }),
+  Tool("type", "Type into a field, replacing what's in it (append=true adds instead). Without an id, types into the focused field. On a dropdown, picks the option with that text. submit=true presses Enter afterwards.", new { text = Str("Text to type, or the option to pick"), id = Str("Element id from read_page or find"), selector = Str("Or: CSS selector"), submit = Bool("Press Enter afterwards"), append = Bool("Add to the field's text instead of replacing it"), tabId = Str("Tab id (optional)") }, "text"),
+  Tool("save_file", "Save a file for the user: a table as CSV, notes as Markdown, data as JSON, or plain text. It goes in their Library and shows in the chat as a card they can open, so don't paste its contents into your reply. Saving again with the same name replaces the one you saved. Up to 5 MB.", new { name = Str("File name with its ending, like laptops-under-800.csv"), content = Str("The whole file") }, "name", "content"),
+  Tool("press_key", "Press a key in the page: Enter, Escape, Tab, ArrowDown, PageDown, Backspace, a letter, or a combination like Control+A or Shift+Tab.", new { key = Str("Key or combination"), tabId = Str("Tab id (optional)") }, "key"),
+  Tool("scroll", "Scroll down or up (the page, or the scrolling panel in the middle of the view), or bring element id into view.", new { direction = new { type = "string", @enum = new[] { "down", "up" } }, amount = Num("Pixels (default: most of a screen)"), id = Str("Element id: scroll it into view, or with direction, scroll the panel it's in"), tabId = Str("Tab id (optional)") }),
+  Tool("wait_for", "Wait until an element or some text appears (or, with gone=true, disappears), for up to timeoutMs.", new { text = Str("Text to wait for"), id = Str("Or: element id"), selector = Str("Or: CSS selector"), gone = Bool("Wait for it to disappear instead"), timeoutMs = Num("Up to 30000 (default 10000)"), tabId = Str("Tab id (optional)") }),
+  Tool("handle_dialog", "Answer the alert, confirm, prompt or \"leave page?\" dialog the page is paused on (other tools tell you when one opens).", new { accept = Bool("true = OK / Leave, false = Cancel / Stay (default true)"), text = Str("For a prompt: the text to answer with"), tabId = Str("Tab id (optional)") }),
+  Tool("upload_file", "Attach files to the file picker the page just opened (click its upload button first), or to a file input by id. Carbon asks the user to allow it.", new { paths = new { type = "array", items = new { type = "string" }, description = "Full paths of the files on this computer" }, id = Str("Element id of a file input (optional)"), tabId = Str("Tab id (optional)") }, "paths"),
+  Tool("screenshot", "PNG of the visible part of a tab. Costs far more tokens than read_page or find: use it only when how the page looks matters.", new { tabId = Str("Tab id (optional)") }),
+ ];
+ internal const string Instructions = "You're driving the user's own Carbon browser, signed in as them. "
+  + "Look things up with web_search and read_url: they need no tab. For hands-on work, open_tab, so the user can keep browsing. "
+  + "Use read_page to see a page (text=false when you only need its controls) and find to locate something on a big page; then click, type and press_key with the element ids. "
+  + "Actions report where you ended up and any new tab, dialog or file picker, so read the page again only when you need to see what changed. "
+  + "If Carbon says it's waiting for the user, tell the user what to click and stop until they reply. "
+  + "Ask the user before buying anything, sending messages or posts, or deleting things. Private tabs, passwords and cookies are never available.";
+ // Every tool can target another Carbon profile by name, or "temp": a fresh window with no cookies, logins or history.
+ // Each profile is its own Carbon process with its own pipe. The AI sidebar's agent is locked to its own profile.
+ static JsonArray BuildTools(bool lockProfile)
+ {
+  var list = JsonSerializer.SerializeToNode(BrowserTools)!.AsArray();
+  // Carbon's own chat can show the user a question with options and wait for the answer.
+  if (NoTools) return [];
+  if (lockProfile) {
+   // Carbon's own companions keep a memory of the user, on this computer, one per companion.
+   list.Add(JsonSerializer.SerializeToNode(Tool("remember", "Keep one short, lasting thing about the user in your memory, like \"Prefers aisle seats\" or \"Lives in Lisbon\": one sentence, 300 characters at most (the chat keeps the details). It's saved with today's date and the message it came from. To change something you remember, pass its id as replaces (or the same slot): the old version stays as history and stops counting. When the user corrects you, use kind correction. Never pass passwords, codes, card or account numbers, form data or anything from private tabs: Carbon refuses them, and it refuses what the user asked you to forget unless they say it again.", new { fact = Str("The fact, in one short sentence"), kind = Str("profile (who they are, how to talk to them), preference, fact, person, project or correction"), subject = Str("Who it's about when it's not the user, like \"Maya (sister)\""), replaces = Str("The id of the memory this one updates, from recall"), slot = Str("A name for a thing that holds one value, like \"home city\" or \"browser\": a new memory in the same slot replaces the old"), guessed = Bool("true when you worked it out from what they did rather than they told you. It's kept apart and marked until they confirm it") }, "fact")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("recall", "Look up what you remember about the user, and summaries of your past chats with them: what best matches the words given, with ids, dates and where each came from. Leave query empty for the most important ones. When nothing matches, it says so: don't guess.", new { query = Str("A few words about what you're looking for") })));
+   list.Add(JsonSerializer.SerializeToNode(Tool("open_memory_source", "Show the messages a memory or a past chat came from, to check what the user actually said. Pass a memory's id or a past chat's id from recall.", new { id = Str("The memory's or the past chat's id") }, "id")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("read_knowledge", "Read one of your knowledge files (listed at the start of the chat): its full text and its version.", new { file = Str("The file's id, like \"deals\"") }, "file")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("update_knowledge", "Rewrite one of your knowledge files with what it should hold now. Read it first: pass its whole new text in short, tidy Markdown, keeping what's still true, and the version you read. If it changed since, nothing is written and you get the current text to work from. Never put passwords, codes, card or account numbers, form data or anything from private tabs in it: Carbon refuses them.", new { file = Str("The file's id, like \"deals\""), text = Str("The file's full new text, in Markdown"), version = Str("The version read_knowledge gave you") }, "file", "text", "version")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("forget", "Forget something: pass its id from recall (that forgets every version of it), or words that every memory to forget contains. If more than three match, nothing is forgotten and you get the list to check with the user. Use it when the user asks you to forget something.", new { id = Str("The memory's id"), about = Str("Or: words in the memories to forget") })));
+   list.Add(JsonSerializer.SerializeToNode(Tool("load_skill", "Load one of your skills, listed at the start of the chat, by its id: you get its full steps to follow. Call it before you start whenever a skill's line describes the task, and skip it when none does. Only your own skills load.", new { id = Str("The skill's id from your list, like \"pitch\"") }, ["id"])));
+   list.Add(JsonSerializer.SerializeToNode(Tool("run_plugin_program", "Run a program that comes with one of your plugins (load_skill lists them), like scripts/watch.py, with its arguments. It runs on the user's computer and Carbon may ask the user first, so wait for it. You get its exit code and output. Programs only: no shell commands.", new { plugin = Str("The plugin's id, from load_skill"), program = Str("The program's path inside the plugin, from load_skill"), args = new { type = "array", items = new { type = "string" }, description = "Its arguments, one per item (optional)" }, timeout = Num("Seconds before Carbon stops it: 120 if left out, 600 at most") }, "plugin", "program")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("ask_user", "Ask the user a question in Carbon's chat and wait for the answer (up to 2 minutes; unanswered, carry on without it). Use it when you need a decision you shouldn't make yourself, or before a risky step a page doesn't show (a Confirm or Continue that pays or sends); Carbon asks before the other risky steps itself. Offer 2-4 short options when you can; the user can also write their own answer.", new { question = Str("The question, in one short sentence"), options = new { type = "array", items = new { type = "string" }, description = "2-4 short answers to pick from" }, tabId = Str("When a page needs the user (a captcha, a code, signing in): that tab, so the card can open it for them") }, "question")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("offer_routine", "Offer to repeat something that clearly helped on a schedule. Carbon asks the user in the chat, and the routine is added to your profile only if they say yes. Offer it once, after a useful result.", new { text = Str("What to do each time, as an instruction to yourself"), time = Str("When, as HH:mm (24-hour)"), days = new { type = "array", items = new { type = "integer" }, description = "Days of the week: 0 = Sunday to 6 = Saturday" } }, "text", "time", "days")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("request_folder", "Ask the user to let you see a folder on their computer that's outside your working folder (or when you have none). Carbon shows a card in the chat: they allow it once (until you finish this reply) or for this chat, or say not now. Once allowed, list_files and read_file reach it by full path, read-only. To create or change files in a folder, pass write: true: once allowed it becomes your working folder, where write_file, edit_file and delete_file work too.", new { path = Str("The folder's full path, like D:\\Photos\\frames, or /Users/you/Photos/frames on a Mac"), why = Str("What you need it for, in a few words. The user sees it."), write = Bool("Ask to work in it, creating and changing files, not just to look. Only when the task needs that.") }, "path")));
+   // Teammates: the user's other companions, each with its own role, memory and tools (MainWindow.Ai.cs, Exchange).
+   list.Add(JsonSerializer.SerializeToNode(Tool("list_companions", "List your teammates: the user's other companions, what each one does, and which one is you.", new { })));
+   list.Add(JsonSerializer.SerializeToNode(Tool("ask_companion", "Ask a teammate something and wait for their reply (up to 10 minutes). They answer with their own role, memory and tools, and only they see your message. Say what you need and why, with what they need from you. The user sees the exchange.", new { name = Str("The teammate's name, from list_companions"), message = Str("What you're asking them"), title = Str("What you're asking for in a few words, as in \"asked Jonah for a pitch\": a pitch. The user sees it.") }, "name", "message")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("tell_companion", "Hand work over to a teammate without waiting: they do it in the background and their result comes back to this chat, where the user sees it. Give them everything they need to do it.", new { name = Str("The teammate's name, from list_companions"), message = Str("What they should do, with what they need from you"), title = Str("What you're asking for in a few words, as in \"asked Jonah for a pitch\": a pitch. The user sees it.") }, "name", "message")));
+   // The user's own apps (Gmail, Calendar, Slack…) through Composio, once they connect them (MainWindow.Plugins.cs). Never in incognito.
+   if (!NoPlugins) {
+   list.Add(JsonSerializer.SerializeToNode(Tool("list_connected_plugins", "Names of the user's apps (plugins) connected for you, like Gmail or Slack. Names only: get_plugin_tools loads one app's actions.", new { })));
+   list.Add(JsonSerializer.SerializeToNode(Tool("find_plugins", "Look up apps Carbon can connect through Composio, by name or category: each one's name, categories and whether it's connected for you.", new { query = Str("Words in the app's name (optional)"), category = Str("A category, like Productivity, Communication or Finance (optional)") })));
+   list.Add(JsonSerializer.SerializeToNode(Tool("get_plugin_tools", "Load one app's actions, only when you need that app: each action's name, what it does, its inputs and whether it asks the user first.", new { plugin = Str("The app, like Gmail or Google Calendar"), query = Str("Words to narrow a long list, like send email (optional)") }, "plugin")));
+   list.Add(JsonSerializer.SerializeToNode(Tool("run_plugin_action", "Run one action from get_plugin_tools. Reading goes ahead; anything that sends, posts, deletes, pays or changes data waits for the user's OK. If the app isn't connected, Carbon asks the user to connect it: don't guess.", new { plugin = Str("The app, like Gmail"), action = Str("The action's name from get_plugin_tools, like GMAIL_SEND_EMAIL"), args = new { type = "object", description = "The action's inputs, as get_plugin_tools describes them" } }, "plugin", "action"))); }
+   return list; }
+  foreach (var t in list) t!["inputSchema"]!["properties"]!["profile"] = JsonSerializer.SerializeToNode(Str("Carbon profile name from list_profiles (optional; defaults to the launch profile). A closed profile is opened. \"temp\" opens a separate temporary window with no cookies, logins or history, deleted after it closes."));
+  list.Insert(0, JsonSerializer.SerializeToNode(Tool("list_profiles", "List Carbon's profiles (separate logins, cookies and tabs) and which are open. Pass a name as `profile` to any other tool, or \"temp\" for a clean temporary window.", new { })));
+  return list;
+ }
+
+ /// The name the user sees for an agent: "Claude", not "claude-code".
+ internal static string AgentName(string client)
+ {
+  string c = client.ToLowerInvariant();
+  foreach (var (key, name) in new[] { ("claude", "Claude"), ("codex", "ChatGPT"), ("openai", "ChatGPT"), ("chatgpt", "ChatGPT"), ("grok", "Grok"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("copilot", "Copilot"), ("windsurf", "Windsurf") })
+   if (c.Contains(key)) return name;
+  return client;
+ }
+ static object Str(string d) => new { type = "string", description = d };
+ static object Bool(string d) => new { type = "boolean", description = d };
+ static object Num(string d) => new { type = "number", description = d };
+ static object Tool(string name, string description, object properties, params string[] required) =>
+  new { name, description, inputSchema = new { type = "object", properties, required } };
+
+ internal static string RunId = ""; // Carbon's own chat: which chat this server works for (--run)
+ internal static bool NoTools; // --no-tools: a talk with no browser at all (setup's interview)
+ internal static bool NoPlugins; // --no-plugins: an incognito chat, where connected apps are off
+ public static void Run(string instance, string? forcedName = null, bool lockProfile = false)
+ {
+  string client = forcedName ?? "An AI agent";
+  var tools = BuildTools(lockProfile);
+  var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+  var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+  var running = new System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource>();
+  // Questions this server asks the user through their AI app (MCP elicitation), by request id.
+  var asks = new System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<JsonNode?>>();
+  bool canElicit = false; int asked = 0;
+  void Send(JsonNode id, object? result, object? error) { string json = error != null ? JsonSerializer.Serialize(new { jsonrpc = "2.0", id, error }) : JsonSerializer.Serialize(new { jsonrpc = "2.0", id, result }); lock (stdout) stdout.WriteLine(json); }
+  // "accept" or "decline", or null if the user closed it, didn't answer or the app couldn't ask.
+  string? Elicit(string question, CancellationToken token)
+  {
+   string rid = "carbon-" + Interlocked.Increment(ref asked);
+   var answer = asks[rid] = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+   lock (stdout) stdout.WriteLine(JsonSerializer.Serialize(new { jsonrpc = "2.0", id = rid, method = "elicitation/create", @params = new { message = question, requestedSchema = new { type = "object", properties = new { } } } }));
+   try { string? action = answer.Task.WaitAsync(TimeSpan.FromMinutes(10), token).GetAwaiter().GetResult()?["action"]?.GetValue<string>(); return action is "accept" or "decline" ? action : null; }
+   catch (Exception ex) when (ex is TimeoutException or OperationCanceledException) { return null; }
+   finally { asks.TryRemove(rid, out _); }
+  }
+  while (stdin.ReadLine() is { } line) {
+   if (string.IsNullOrWhiteSpace(line)) continue;
+   JsonNode? msg; try { msg = JsonNode.Parse(line); } catch (JsonException) { continue; }
+   var id = msg?["id"]?.DeepClone(); string method = msg?["method"]?.GetValue<string>() ?? "";
+   if (method.Length == 0) { if (id is JsonValue v && v.TryGetValue<string>(out var rid) && asks.TryRemove(rid, out var answer)) answer.TrySetResult(msg?["result"]); continue; } // the app answering us
+   if (method == "notifications/cancelled") { if (msg?["params"]?["requestId"]?.ToJsonString() is { } rid && running.TryRemove(rid, out var cancel)) cancel.Cancel(); continue; }
+   if (id == null) continue; // other notifications need no reply
+   try {
+    switch (method) {
+     case "initialize":
+      if (forcedName == null) client = AgentName(msg?["params"]?["clientInfo"]?["name"]?.GetValue<string>() ?? client);
+      canElicit = msg?["params"]?["capabilities"]?["elicitation"] != null;
+      Send(id, new { protocolVersion = msg?["params"]?["protocolVersion"]?.GetValue<string>() ?? "2025-06-18", capabilities = new { tools = new { } },
+       serverInfo = new { name = "carbon", version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "1" },
+       instructions = Instructions + (lockProfile ? "" : " Carbon can have several profiles (separate logins); list_profiles shows them and every tool takes an optional profile name, or \"temp\" for a clean temporary window.") }, null);
+      break;
+     case "ping": Send(id, new { }, null); break;
+     case "tools/list": Send(id, new { tools }, null); break;
+     case "tools/call": {
+      // Calls run side by side, so one slow page never holds up the next request, and the app can cancel any of them.
+      string name = msg?["params"]?["name"]?.GetValue<string>() ?? "";
+      var args = (msg?["params"]?["arguments"] ?? new JsonObject()).DeepClone();
+      if (lockProfile) (args as JsonObject)?.Remove("profile");
+      var cts = new CancellationTokenSource(); string key = id.ToJsonString(); running[key] = cts;
+      string who = client;
+      _ = Task.Run(() => {
+       try {
+        string reply = lockProfile && name == "list_profiles" || name == "user_confirmed" ? JsonSerializer.Serialize(new { ok = false, error = "Unknown tool: " + name }) : Call(instance, who, name, args.DeepClone(), cts.Token, canElicit);
+        // The user isn't at Carbon: their AI app asks them (the AI never sees the question), then the call carries on.
+        for (int tries = 0; tries < 2 && canElicit && JsonNode.Parse(reply)?["confirm"] is { } ask && Elicit(ask["question"]!.GetValue<string>(), cts.Token) is { } action; tries++) {
+         var confirm = (JsonObject)args.DeepClone(); confirm["code"] = ask["code"]!.GetValue<string>(); confirm["allow"] = action == "accept";
+         Call(instance, who, "user_confirmed", confirm, cts.Token);
+         reply = action == "accept" ? Call(instance, who, name, args.DeepClone(), cts.Token, canElicit) : JsonSerializer.Serialize(new { ok = false, error = "The user said no. Don't try again unless they ask." });
+        }
+        if (!cts.IsCancellationRequested) Send(id, ToolResult(reply), null);
+       } catch (OperationCanceledException) { }
+       catch (Exception ex) { Send(id, null, new { code = -32603, message = "Carbon error: " + ex.Message }); }
+       finally { running.TryRemove(key, out _); }
+      });
+      break;
+     }
+     default: Send(id, null, new { code = -32601, message = "Method not found: " + method }); break;
+    }
+   } catch (Exception ex) { Send(id, null, new { code = -32603, message = "Carbon error: " + ex.Message }); }
+  }
+ }
+ static readonly JsonSerializerOptions Relaxed = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+ /// A page read comes back as plain text (no JSON escaping, fewer tokens); other results as compact JSON.
+ static object ToolResult(string reply)
+ {
+  var r = JsonNode.Parse(reply)!;
+  if (r["ok"]?.GetValue<bool>() != true) return new { content = new[] { new { type = "text", text = r["error"]?.GetValue<string>() ?? "Failed." } }, isError = true };
+  var data = r["result"];
+  if (data is JsonObject obj && obj["image"] is { } img) return new { content = new object[] { new { type = "image", data = img.GetValue<string>(), mimeType = obj["mime"]?.GetValue<string>() ?? "image/png" } } };
+  return new { content = new[] { new { type = "text", text = PlainText(data) } } };
+ }
+ static string PlainText(JsonNode? data) => data is JsonObject { Count: 1 } o && o["text"] is JsonValue v && v.TryGetValue<string>(out var text) ? text : data?.ToJsonString(Relaxed) ?? "{}";
+
+
+ static string ListProfiles(string instance) => JsonSerializer.Serialize(new { ok = true, result = ProfileCatalog.Read().Select(p => new {
+  name = p.Name, id = p.Id, open = IsOpen(p), launch = p.Id == ProfileCatalog.LaunchId, defaultForAgent = App.InstanceName(ProfileCatalog.Folder(p)) == instance }) });
+
+ static bool IsOpen(BrowserProfile p) { try { using var gate = Mutex.OpenExisting(App.InstanceName(ProfileCatalog.Folder(p))); return true; } catch (WaitHandleCannotBeOpenedException) { return false; } catch (UnauthorizedAccessException) { return true; } }
+
+ /// Sends one tool call to the Carbon process for the requested profile (opening it if it's closed) and returns its JSON reply.
+ static string Call(string instance, string client, string tool, JsonNode args, CancellationToken cancel = default, bool elicit = false)
+ {
+  if (tool == "list_profiles") return ListProfiles(instance);
+  string name = args is JsonObject o && o["profile"]?.GetValue<string>() is { Length: > 0 } n ? n : "";
+  (args as JsonObject)?.Remove("profile");
+  if (name.Equals("temp", StringComparison.OrdinalIgnoreCase)) {
+   // The user's own Carbon decides first: AI control off, a block, or a question to answer, all come back as they are.
+   string answer = Call(instance, client, "list_tabs", new JsonObject(), cancel, elicit);
+   if (JsonNode.Parse(answer)?["ok"]?.GetValue<bool>() == false) return answer;
+   instance = TempInstance(client);
+  }
+  else if (name.Length > 0) {
+   var profile = ProfileCatalog.Read().FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase) || p.Id == name);
+   if (profile == null) return JsonSerializer.Serialize(new { ok = false, error = $"No Carbon profile is named \"{name}\". Use list_profiles." });
+   string folder = Path.GetFullPath(ProfileCatalog.Folder(profile));
+   instance = App.InstanceName(folder);
+   if (!IsOpen(profile)) {
+    var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true }; // shell launch: the window must not inherit this stdio pipe
+    start.ArgumentList.Add("--profile"); start.ArgumentList.Add(folder);
+    start.ArgumentList.Add("--profiles-root"); start.ArgumentList.Add(App.ProfileHome);
+    if (App.IsQa) start.ArgumentList.Add("--qa");
+    System.Diagnostics.Process.Start(start);
+   }
+  }
+  for (var until = DateTime.UtcNow.AddSeconds(name.Length > 0 ? 25 : 0); ; Thread.Sleep(500)) {
+   cancel.ThrowIfCancellationRequested();
+   try {
+    // One connection per call: calls never queue behind each other, and a cancelled call just hangs up.
+    using var pipe = new NamedPipeClientStream(".", MainWindow.AgentPipe(instance), PipeDirection.InOut, PipeOptions.CurrentUserOnly | PipeOptions.Asynchronous);
+    pipe.Connect(3000);
+    using var reader = new StreamReader(pipe, new UTF8Encoding(false));
+    using var writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+    writer.WriteLine(JsonSerializer.Serialize(new { client, tool, args, elicit, run = RunId }));
+    // Carbon answers every call within its own time limit; this only covers a Carbon that froze.
+    using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancel); limit.CancelAfter(TimeSpan.FromMinutes(tool is "list_tabs" or "save_file" ? 2 : 12)); // ask_user and permission cards wait up to 11 minutes
+    try { return reader.ReadLineAsync(limit.Token).AsTask().GetAwaiter().GetResult() ?? throw new IOException("Carbon closed the connection."); }
+    catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { return JsonSerializer.Serialize(new { ok = false, error = "Carbon didn't answer in time. It may be busy; try again, or ask the user to check Carbon." }); }
+   } catch (Exception ex) when (ex is IOException or TimeoutException or UnauthorizedAccessException) {
+    if (DateTime.UtcNow < until) continue;
+    return JsonSerializer.Serialize(new { ok = false, error = name.Equals("temp", StringComparison.OrdinalIgnoreCase) ? "The temporary window didn't start. Try again." : (name.Length > 0 ? $"Carbon profile \"{name}\" isn't reachable. " : "Carbon isn't running. ") + "Open it and turn on Settings → Let AI agents control Carbon (each profile has its own switch), then try again." });
+   }
+  }
+ }
+
+ static string? tempFolder;
+ static readonly object tempLock = new();
+ /// Opens (once per agent session) a Carbon window on a brand-new throwaway profile, with this agent already allowed in.
+ static string TempInstance(string client) { lock (tempLock) return OpenTemp(client); }
+ static string OpenTemp(string client)
+ {
+  if (tempFolder != null && IsOpen(tempFolder)) return App.InstanceName(tempFolder);
+  string root = Path.Combine(Path.GetTempPath(), "Carbon-temp");
+  if (Directory.Exists(root)) // sweep earlier temporary profiles whose windows are closed
+   foreach (var old in Directory.GetDirectories(root)) if (!IsOpen(old)) try { Directory.Delete(old, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+  tempFolder = Path.Combine(root, Guid.NewGuid().ToString("N"));
+  Directory.CreateDirectory(tempFolder);
+  File.WriteAllText(Path.Combine(tempFolder, "state.json"), JsonSerializer.Serialize(new { UiVersion = 4, Welcome = false, Preferences = new { AgentsEnabled = true, ApprovedAgents = new[] { client } } }));
+  var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true };
+  foreach (var a in new[] { "--profile", tempFolder, "--profiles-root", tempFolder, "--temp" }) start.ArgumentList.Add(a);
+  if (App.IsQa) start.ArgumentList.Add("--qa");
+  System.Diagnostics.Process.Start(start);
+  return App.InstanceName(tempFolder);
+ }
+ static bool IsOpen(string folder) { try { using var gate = Mutex.OpenExisting(App.InstanceName(folder)); return true; } catch (WaitHandleCannotBeOpenedException) { return false; } catch (UnauthorizedAccessException) { return true; } }
+
+ [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern bool AttachConsole(int pid);
+
+ // `Carbon.exe --cli <tool> [key=value ...]`: one tool call from a terminal. Prints JSON; screenshots are saved as PNG.
+ public static int Cli(string instance, string[] argv)
+ {
+  AttachConsole(-1); // WPF exe: borrow the caller's console so output shows in a terminal
+  var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+  var tools = BuildTools(false);
+  if (argv.Length == 0 || argv[0] is "help" or "--help" or "-h") {
+   stdout.WriteLine("Usage: Carbon.exe --cli <tool> as=<your name> [key=value ...]\n\nTools:");
+   foreach (var t in tools) {
+    var props = t!["inputSchema"]!["properties"]!.AsObject().Select(p => p.Key + "=");
+    stdout.WriteLine($"  {t["name"]} {string.Join(" ", props)}\n      {t["description"]}");
+   }
+   return 0;
+  }
+  var args = new JsonObject();
+  foreach (var a in argv.Skip(1)) {
+   int eq = a.IndexOf('='); if (eq < 1) { stdout.WriteLine($"Arguments are key=value, got: {a}"); return 2; }
+   string k = a[..eq].TrimStart('-'), v = a[(eq + 1)..];
+   args[k] = v is "true" or "false" ? bool.Parse(v) : double.TryParse(v, System.Globalization.CultureInfo.InvariantCulture, out var n) && k is "amount" or "timeoutMs" or "offset" ? n : k == "paths" ? new JsonArray(v.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => (JsonNode)x).ToArray()) : v;
+  }
+  // Agents must say who they are, so the user sees "Codex is using Carbon", not a generic name.
+  if (args["as"]?.ToString() is not { Length: > 0 } who) { stdout.WriteLine("Error: say who you are with as=<your name>, for example as=Claude or as=Codex."); return 2; }
+  args.Remove("as");
+  string reply = Call(instance, AgentName(who), argv[0], args);
+  var r = JsonNode.Parse(reply)!;
+  if (r["ok"]?.GetValue<bool>() != true) { stdout.WriteLine("Error: " + (r["error"]?.GetValue<string>() ?? "Failed.")); return 1; }
+  var data = r["result"];
+  if (data is JsonObject obj && obj["image"] is { } img) {
+   string file = Path.Combine(Path.GetTempPath(), $"carbon-screenshot-{DateTime.Now:yyyyMMdd-HHmmss}.png");
+   File.WriteAllBytes(file, Convert.FromBase64String(img.GetValue<string>()));
+   stdout.WriteLine(file); return 0;
+  }
+  stdout.WriteLine(PlainText(data));
+  return 0;
+ }
+}

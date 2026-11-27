@@ -1,0 +1,454 @@
+"""Files in the message box: + > Add files, a drop on the box (it lights up) and a paste each add a chip with the file's
+icon, name and size; x removes one; too big says why and adds nothing. Sending names them to the AI, which reads each
+with read_attachment: text as text, a PDF's text, an image as an image. The sent message shows them, a follow-up from
+the chat's own box works too, and deleting the chat deletes the files. A fake agent app reads every id in the prompt.
+The files are compact pills in one row (x on hover, a picture opens big), files dragged over a chat drop in anywhere on
+it, and a long paste is a Pasted text pill that goes to the AI in the message (over 25 KB, a file).
+
+Run: python tests/desktop/attach.py artifacts/Carbon-QA/Carbon.exe
+Out: artifacts/attach-*/ (attach-*.png in the profile folder)
+"""
+import base64
+import http.server
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import textwrap
+import threading
+import time
+import uuid
+
+sys.path.insert(0, str(Path(__file__).parent))
+from qa import CREW, MAC, ROOT, js, launch, launcher, rpc, send, until  # noqa: E402
+
+EXE = Path(sys.argv[1]).resolve()
+RUN = ROOT / "artifacts" / ("attach-" + uuid.uuid4().hex[:8])
+PROFILE = RUN / "profile"
+BIN = RUN / "bin"
+FAILED = []
+NOTES = "Launch checklist\n- Book the venue\n- Send invites by Friday\n"
+TIDE = "Tide table, North Harbor.\n" + "High water 06:12, low water 12:31. " * 70  # a long paste: 2,476 characters
+# A one-page PDF with a line of real text (Helvetica, uncompressed), so its text has to come out of the PDF.
+PDF_OBJECTS = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+               "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+               None, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def pdf(text):
+    stream = f"BT /F1 18 Tf 72 700 Td ({text}) Tj ET".encode()
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(PDF_OBJECTS, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + (b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream" if body is None else body.encode()) + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(offsets) + 1}\n0000000000 65535 f \n".encode() + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += f"trailer\n<< /Size {len(offsets) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+FAKE = textwrap.dedent(r'''
+    import json, os, re, subprocess, sys, time
+    here = os.path.dirname(os.path.abspath(__file__))
+    args = sys.argv[1:]
+    if args[:1] == ["status"]: print("signed in"); sys.exit(0)
+    prompt = sys.stdin.read()
+    with open(os.path.join(here, "prompts.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps({"prompt": prompt}) + "\n")
+    def say(e): print(json.dumps(e), flush=True)
+    server = json.load(open(args[args.index("--mcp") + 1]))["mcpServers"]["carbon"]
+    still = subprocess.Popen([server["command"]] + server["args"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    n = 0
+    def request(method, params):
+        global n
+        n += 1
+        still.stdin.write((json.dumps({"jsonrpc": "2.0", "id": n, "method": method, "params": params}) + "\n").encode()); still.stdin.flush()
+        for line in still.stdout:
+            try: m = json.loads(line)
+            except ValueError: continue
+            if m.get("id") == n: return m
+    request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake", "version": "1"}})
+    still.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'); still.stdin.flush()
+    say({"type": "system", "subtype": "init", "session_id": "s-%d" % time.time_ns()})
+    ids = re.findall(r"id ([a-f0-9]{16})\)", prompt) + (["0123456789abcdef"] if "TRY A BAD ID" in prompt else [])
+    for i in ids:
+        r = request("tools/call", {"name": "read_attachment", "arguments": {"id": i}})["result"]
+        c = r["content"][0]
+        with open(os.path.join(here, "results.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": i, "error": bool(r.get("isError")), "type": c["type"], "text": c.get("text", ""), "mime": c.get("mimeType"), "data": len(c.get("data", ""))}) + "\n")
+    say({"type": "assistant", "message": {"content": [{"type": "text", "text": "Read them."}]}})
+    still.stdin.close()
+''')
+
+
+def check(ok, name):
+    print(("PASS " if ok else "FAIL ") + name, flush=True)
+    if not ok:
+        FAILED.append(name)
+
+
+def lines(name):
+    file = BIN / name
+    return [json.loads(l) for l in file.read_text(encoding="utf-8").splitlines()] if file.exists() else []
+
+
+def chats():
+    try:
+        return json.loads((PROFILE / "ai" / "chats.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def files_js(spec):
+    """JS for a DataTransfer holding files; spec is [(name, type, base64 bytes or a size of zeros)]."""
+    parts = []
+    for name, kind, body in spec:
+        data = f"Uint8Array.from(atob('{body}'), c => c.charCodeAt(0))" if isinstance(body, str) else f"new Uint8Array({body})"
+        parts.append(f"t.items.add(new File([{data}], {json.dumps(name)}, {{ type: {json.dumps(kind)} }}))")
+    return "(() => { const t = new DataTransfer(); " + "; ".join(parts) + "; return t })()"
+
+
+def chips(p, box):
+    """The files in a box (not the ones still coming in)."""
+    return js(p, f"[...document.querySelectorAll('{box} .composer .file-chip:not(.is-loading):not(.paste-chip)')].map(c => c.innerText.replace(/\\s+/g, ' ').trim())") or []
+
+
+def drop_on(p, box, transfer):
+    js(p, f"document.querySelector('{box} .composer').dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, dataTransfer: {transfer} }}))")
+
+
+def toasts(p):
+    return js(p, "[...document.querySelectorAll('[data-sonner-toast]')].map(t => t.innerText).join(' ')") or ""
+
+
+class UploadPage(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        box = "display:block;width:200px;height:60px"
+        body = f"<!doctype html><title>Up</title><input id=jpg type=file accept='image/jpeg' style='{box}'><input id=any type=file accept='image/*' style='{box}'>".encode()
+        self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def real_clipboard(p):
+    """A real paste, so the computer's real clipboard: what was on it goes back right after."""
+    picture = base64.b64encode(PNG).decode()
+    home = ".home-compose"
+    message = f"{home} [aria-label=Message]"
+
+    def board(what, **a):
+        return until(lambda: rpc(p, "clipboard", what=what, **a).get("ok"), 5)
+
+    def keys():
+        if MAC:
+            rpc(p, "key", key="V", mods="Control", post=True)
+            return
+        for kind, commands in (("rawKeyDown", ["paste"]), ("keyUp", [])):
+            rpc(p, "shellCdp", method="Input.dispatchKeyEvent", parameters={"type": kind, "key": "v", "code": "KeyV", "windowsVirtualKeyCode": 86, "modifiers": 2, "commands": commands})
+
+    def clear():
+        js(p, f"document.querySelectorAll('{home} .file-chip button[aria-label^=Remove]').forEach(b => b.click())")
+        until(lambda: not chips(p, home), 3)
+
+    def menu():
+        js(p, f"document.querySelector('{home} .composer-add').dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, button: 0, pointerType: 'mouse' }}))")
+        until(lambda: js(p, "!!document.querySelector('[role=menu]')"), 5)
+        js(p, "[...document.querySelectorAll('[role=menuitem]')].find(i => i.innerText.includes('Paste copied image')).click()")
+        until(lambda: not js(p, "!!document.querySelector('[role=menu]')"), 3)
+
+    send(p, "new")
+    until(lambda: js(p, f"!!document.querySelector('{message}')"), 10)
+    time.sleep(.4)
+    check(board("save"), "What's on the clipboard is kept to put back")
+    try:
+        board("image", data=picture)
+        js(p, f"document.querySelector('{message}').focus()")
+        keys()
+        got = until(lambda: chips(p, home), 10) or []
+        check(len(got) == 1 and ".png " in got[0], f"A real paste of a copied picture adds it to the box ({got})")
+        board("text", text="Just some words")
+        keys()
+        check(until(lambda: "Just some words" in (js(p, f"document.querySelector('{message}').innerText") or ""), 5) and len(chips(p, home)) == 1, "Copied words still paste as words")
+        clear()
+
+        js(p, f"document.querySelector('{message}').blur()")
+        board("image", data=picture)
+        keys()
+        got = until(lambda: chips(p, home), 10) or []
+        check(len(got) == 1 and ".png " in got[0], f"With no box in focus a copied picture lands in the box on show ({got})")
+        clear()
+
+        menu()
+        got = until(lambda: chips(p, home), 10) or []
+        check(len(got) == 1 and ".png " in got[0], f"+ > Paste copied image adds it ({got})")
+        clear()
+        file = RUN / "copied notes.txt"
+        file.write_bytes(NOTES.encode())
+        board("file", path=str(file))
+        menu()
+        got = until(lambda: chips(p, home), 10) or []
+        check(got == [f"copied notes.txt {len(NOTES.encode())} B"], f"...and takes a copied file as well ({got})")
+        clear()
+        js(p, f"document.querySelector('{message}').focus()")
+        keys()
+        got = until(lambda: chips(p, home), 10) or []
+        check(got == [f"copied notes.txt {len(NOTES.encode())} B"] and "copied notes" not in (js(p, f"document.querySelector('{message}').innerText") or ""),
+              f"A real {'Cmd' if MAC else 'Ctrl'}+V of a file copied in {'Finder' if MAC else 'Explorer'} adds it ({got})")
+        clear()
+        board("text", text="Not a picture")
+        menu()
+        toast = until(lambda: "no image copied" in (js(p, "[...document.querySelectorAll('[data-sonner-toast]')].map(t => t.innerText).join(' ')") or "") , 5)
+        check(toast and not chips(p, home), "With no picture copied it says so and adds nothing")
+
+        board("image", data=picture)
+        js(p, f"document.querySelector('{message}').focus()")
+        keys()
+        until(lambda: chips(p, home), 10)
+        done = len(lines("results.jsonl"))
+        js(p, f"document.querySelector('{message}').dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }}))")
+        until(lambda: len(lines("results.jsonl")) > done, 30)
+        row = (lines("results.jsonl")[done:] or [{}])[-1]
+        check(row.get("type") == "image" and row.get("mime") == "image/png", f"A pasted picture reaches the AI as an image ({row.get('type')})")
+
+        # A site's own file button: the copied picture comes first, in a type the site takes.
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), UploadPage)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        send(p, "new", url=f"http://127.0.0.1:{server.server_port}/")
+        until(lambda: rpc(p, "eval", script="document.readyState === 'complete' && !!document.querySelector('#any')") is True, 15)
+        for which, ext, start in (("jpg", ".jpg", "data:image/jpeg;base64,/9j/"), ("any", ".png", "data:image/png;base64,iVBOR")):
+            at = rpc(p, "eval", script=f"(r => [r.x + 20, r.y + 20])(document.querySelector('#{which}').getBoundingClientRect())")
+            for kind in ("mousePressed", "mouseReleased"):
+                rpc(p, "pageCdp", method="Input.dispatchMouseEvent", parameters={"type": kind, "x": at[0], "y": at[1], "button": "left", "clickCount": 1})
+            until(lambda: js(p, "!!document.querySelector('.upload-card')"), 15)
+            first = js(p, "document.querySelector('.upload-tile .upload-name')?.innerText")
+            until(lambda: js(p, "document.querySelector('.upload-tile.is-open').disabled") is False, 3)
+            js(p, "document.querySelector('.upload-tile').click()")
+            until(lambda: rpc(p, "eval", script=f"document.querySelector('#{which}').files.length") == 1, 10)
+            name = rpc(p, "eval", script=f"document.querySelector('#{which}').files[0]?.name ?? ''") or ""
+            rpc(p, "eval", script=f"window.__read = ''; (r => {{ r.onload = () => window.__read = r.result; r.readAsDataURL(document.querySelector('#{which}').files[0]) }})(new FileReader())")
+            read = until(lambda: rpc(p, "eval", script="window.__read"), 5) or ""
+            check(first == "Copied" and name.endswith(ext) and read.startswith(start), f"A file button for {which} offers the copied picture first, as {ext} ({first!r}, {name!r}, {read[:30]!r})")
+        server.shutdown()
+    finally:
+        check(board("restore"), "What was on the clipboard goes back")
+
+
+def main():
+    BIN.mkdir(parents=True)
+    (PROFILE / "agents").mkdir(parents=True)
+    (BIN / "fake_agent.py").write_text(FAKE, encoding="utf-8")
+    launcher(BIN / "fakeagent", BIN / "fake_agent.py")
+    (PROFILE / "agents" / "fake.json").write_text(json.dumps({"id": "fake", "name": "Fake agent", "enabled": True, "command": str(BIN / "fakeagent"),
+        "detect": ["status"], "expect": "signed in", "run": ["run", "--mcp", "{mcpConfig}"], "output": "stream-json"}))
+    (PROFILE / "state.json").write_text(json.dumps({"UiVersion": 6, "Welcome": False, "Preferences": {"Companions": CREW, "AgentsEnabled": True, "AiHarness": "fake"},
+        "Tabs": [{"Id": "home", "Title": "Home", "Url": "about:blank"}], "ActiveId": "home"}))
+    p = launch(EXE, PROFILE)
+    try:
+        until(lambda: js(p, "!!document.body.innerText.length"), 20)
+        send(p, "new")
+        until(lambda: js(p, "!!document.querySelector('.home-compose [aria-label=Message]')"), 10)
+        time.sleep(.4)
+        js(p, "dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))")
+        home = ".home-compose"
+
+        # + opens a menu that starts with Add files.
+        js(p, f"document.querySelector('{home} .composer-add').dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, button: 0, pointerType: 'mouse' }}))")
+        first = until(lambda: js(p, "document.querySelector('[role=menu] [role=menuitem]')?.innerText.replace(/\\s+/g, ' ').trim()"), 5) or ""
+        check(first.startswith("Add files"), f"+ opens a menu that starts with Add files ({first!r})")
+        rpc(p, "capture", name="attach-menu.png")
+        js(p, "dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); document.querySelector('[role=menu]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
+        until(lambda: not js(p, "!!document.querySelector('[role=menu]')"), 3)
+
+        # Dragging files over the box lights it up; dropping adds a chip per file with its icon, name and size.
+        drop = files_js([("notes.txt", "text/plain", base64.b64encode(NOTES.encode()).decode()), ("brief.pdf", "application/pdf", base64.b64encode(pdf("Quarterly revenue grew 12 percent")).decode())])
+        js(p, f"window.__drop = {drop}; document.querySelector('{home} .composer').dispatchEvent(new DragEvent('dragover', {{ bubbles: true, cancelable: true, dataTransfer: window.__drop }}))")
+        check(until(lambda: js(p, f"!!document.querySelector('{home} .composer.is-drop .composer-drop')"), 3), "Dragging files over the box lights it up and says Drop to attach")
+        rpc(p, "capture", name="attach-drop.png")
+        js(p, f"document.querySelector('{home} .composer').dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, dataTransfer: window.__drop }}))")
+        got = until(lambda: len(chips(p, home)) == 2 and chips(p, home), 10) or chips(p, home)
+        check(got == [f"notes.txt {len(NOTES.encode())} B", "brief.pdf " + js(p, "(n => n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB')(window.__drop.files[1].size)")] and not js(p, f"!!document.querySelector('{home} .composer.is-drop')"),
+              f"Dropping adds a chip per file with its name and size, and the highlight goes ({got})")
+        check(js(p, f"[...document.querySelectorAll('{home} .file-chip .file-icon svg')].length") == 2, "Each chip has the file's icon")
+
+        # Paste an image.
+        js(p, f"document.querySelector('{home} [aria-label=Message]').dispatchEvent(new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, clipboardData: {files_js([('dot.png', 'image/png', base64.b64encode(PNG).decode())])} }}))")
+        got = until(lambda: len(chips(p, home)) == 3 and chips(p, home), 10) or chips(p, home)
+        check(got[-1:] == [f"dot.png {len(PNG)} B"], f"Pasting an image adds it too ({got})")
+        check(until(lambda: js(p, f"!!document.querySelector('{home} .file-chip img.file-thumb')?.src.startsWith('data:image/')"), 10), "An image's chip shows a picture of it")
+        js(p, f"document.querySelector('{home} .file-chip .file-open[aria-label=\"Preview dot.png\"]').click()")
+        check(until(lambda: js(p, "!!document.querySelector('.file-preview img')?.src.startsWith('data:image/png')"), 5), "A click on a picture opens it big")
+        check(until(lambda: rpc(p)["overlay"] is True, 3), f"...above any page, like every dialog (overlay {rpc(p)['overlay']})")
+        js(p, "document.querySelector('.file-preview').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))")
+        check(until(lambda: not js(p, "!!document.querySelector('.file-preview')"), 3), "...and Esc closes it")
+        x = f"document.querySelector('{home} .file-chip .file-x')"
+        check(js(p, f"getComputedStyle({x}).opacity") == "0", "A chip's x hides until the pointer is on it")
+        js(p, f"{x}.focus()")
+        if js(p, f"{x}.matches(':focus')"):
+            check(until(lambda: js(p, f"getComputedStyle({x}).opacity") == "1", 2), "...and shows on focus")
+        else:
+            print("SKIP ...and shows on focus: the QA window isn't the focused one, so nothing in it matches :focus")
+        js(p, f"{x}.blur()")
+
+        # Long text: a Pasted text pill with its first line, not text in the box. It opens, and can go back in as text. Over
+        # 25 KB it's a file. Short text stays text.
+        paste_text = "(t => {{ const d = new DataTransfer(), box = document.querySelector('{0} [aria-label=Message]'); d.setData('text/plain', t); box.focus(); box.dispatchEvent(new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, clipboardData: d }})) }})({1})"
+        typed = lambda: js(p, f"document.querySelector('{home} [aria-label=Message]').innerText") or ""
+        pills = lambda: js(p, f"[...document.querySelectorAll('{home} .paste-chip')].map(c => c.innerText.replace(/\\s+/g, ' ').trim())") or []
+        js(p, paste_text.format(home, json.dumps(TIDE)))
+        check(until(lambda: pills() == ["Tide table, North Harbor. Pasted text"], 5) and "High water" not in typed() and len(chips(p, home)) == 3, f"A long paste is a Pasted text pill with its first line, not text or a file ({pills()}, {chips(p, home)})")
+        rpc(p, "capture", name="attach-paste.png")
+        time.sleep(1)
+        kept = json.loads((PROFILE / "ai" / "drafts" / "home.json").read_text(encoding="utf-8")) if (PROFILE / "ai" / "drafts" / "home.json").exists() else {}
+        check(kept.get("pastes") == [TIDE], "The box's draft keeps it")
+        js(p, f"document.querySelector('{home} .paste-chip .file-open').click()")
+        check(until(lambda: "High water 06:12" in (js(p, "document.querySelector('.paste-dialog pre')?.innerText") or ""), 5), "A click opens all of it")
+        js(p, "[...document.querySelectorAll('.paste-dialog button')].find(b => b.innerText.includes('Put it in the message')).click()")
+        check(until(lambda: not pills() and "High water 06:12" in typed() and not js(p, "!!document.querySelector('.paste-dialog')"), 5), "Put it in the message makes it plain text in the box")
+        js(p, f"(t => {{ t.focus(); document.execCommand('selectAll'); document.execCommand('delete') }})(document.querySelector('{home} [aria-label=Message]'))")
+        js(p, paste_text.format(home, json.dumps("Tide table, North Harbor. " * 1100)))
+        got = until(lambda: len(chips(p, home)) == 4 and chips(p, home), 10) or chips(p, home)
+        check(got[-1:] == ["Pasted text.txt 28 KB"] and not pills() and "Tide table" not in typed(), f"Over 25 KB it goes in as a file, Pasted text.txt ({got})")
+        js(p, f"document.querySelector('{home} .file-chip button[aria-label=\"Remove Pasted text.txt\"]').click()")
+        js(p, paste_text.format(home, json.dumps("Tide table")))
+        check(until(lambda: "Tide table" in (js(p, f"document.querySelector('{home} [aria-label=Message]').innerText") or ""), 5) and len(chips(p, home)) == 3, "A short one stays text in the box")
+        js(p, f"(t => {{ t.focus(); document.execCommand('selectAll'); document.execCommand('delete') }})(document.querySelector('{home} [aria-label=Message]'))")
+
+        # Big files: a 6 MB picture comes in 4 MB pieces, its chip showing how far it is, and is kept whole. Over 5 MB it isn't
+        # shown as a picture (the AI apps take pictures up to 5 MB), so its chip has the icon.
+        js(p, "window.__pcts = []; window.__watch = new MutationObserver(() => document.querySelectorAll('.file-chip.is-loading [role=progressbar]').forEach(b => window.__pcts.push(+b.getAttribute('aria-valuenow')))); window.__watch.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-valuenow'] })")
+        drop_on(p, home, files_js([('huge.png', 'image/png', 6 * 1024 * 1024)]))
+        got = until(lambda: len(chips(p, home)) == 4 and chips(p, home), 30) or chips(p, home)
+        pcts = js(p, "window.__watch.disconnect(); window.__pcts") or []
+        check(got[-1:] == ["huge.png 6.0 MB"] and not js(p, f"!!document.querySelector('{home} .file-chip.is-loading')"), f"A 6 MB picture is added ({got})")
+        check(0 in pcts and any(0 < n < 100 for n in pcts), f"...its chip shows how far it is while it comes in ({sorted(set(pcts))})")
+        kept = [d for d in (PROFILE / "ai" / "attachments").iterdir() if (d / "huge.png").exists()]
+        check(len(kept) == 1 and (kept[0] / "huge.png").stat().st_size == 6 * 1024 * 1024 and [f.name for f in kept[0].iterdir()] == ["huge.png"], "...and Carbon keeps it whole, from its pieces")
+        time.sleep(1)
+        check(not js(p, f"!!document.querySelector('{home} .file-chip[title=\"huge.png\"] img.file-thumb')"), "...with its icon, not a picture of it (over 5 MB)")
+        js(p, f"document.querySelector('{home} .file-chip button[aria-label=\"Remove huge.png\"]').click()")
+        until(lambda: len(chips(p, home)) == 3, 3)
+
+        # Over 500 MB: says why, adds nothing (a File that says it's 600 MB).
+        drop_on(p, home, "(() => { const f = new File(['x'], 'film.mov', { type: 'video/quicktime' }), t = new DataTransfer(); Object.defineProperty(f, 'size', { value: 600 * 1048576 }); Object.defineProperty(t, 'files', { value: [f] }); Object.defineProperty(t, 'types', { value: ['Files'] }); return t })()")
+        toast = until(lambda: "film.mov" in toasts(p) and toasts(p), 5) or toasts(p)
+        check("film.mov is 600.0 MB. Files can be up to 500 MB." in toast and len(chips(p, home)) == 3 and not js(p, "!!document.querySelector('.file-chip.is-loading')"), f"A file over 500 MB says why and isn't added ({toast!r})")
+        key = uuid.uuid4().hex[:16]
+        send(p, "aiAttach", to="nobody", key=key, name="film.mov", size=600 * 1048576, offset=0, data="")
+        time.sleep(1)
+        check(not (PROFILE / "ai" / "attachments" / key).exists(), "...and Carbon itself takes nothing over 500 MB")
+
+        # As many files as you like, of any kind.
+        drop_on(p, home, files_js([(f"part-{i}.xyz", "application/octet-stream", 3) for i in range(12)]))
+        got = until(lambda: len(chips(p, home)) == 15 and chips(p, home), 20) or chips(p, home)
+        check(len(got) == 15 and got[3:] == [f"part-{i}.xyz 3 B" for i in range(12)], f"Twelve more files, of a kind Carbon doesn't know, all go in ({len(got)})")
+        row = js(p, f"(r => [r.offsetHeight, r.scrollWidth > r.clientWidth])(document.querySelector('{home} .skill-chips'))") or [0, False]
+        check(row[0] < 50 and row[1], f"...in one row that scrolls sideways, so the box keeps its size ({row})")
+        for i in range(12):
+            js(p, f"document.querySelector('{home} .file-chip button[aria-label=\"Remove part-{i}.xyz\"]')?.click()")
+            until(lambda: len(chips(p, home)) == 14 - i, 3)
+        check(len(chips(p, home)) == 3, "...and x takes them out again")
+
+        # x on a file still coming in stops it, and nothing of it is kept.
+        drop_on(p, home, files_js([("long.mov", "video/quicktime", 40 * 1024 * 1024)]))
+        until(lambda: js(p, f"!!document.querySelector('{home} .file-chip.is-loading button[aria-label=\"Stop adding long.mov\"]')"), 5)
+        rpc(p, "capture", name="attach-coming.png")
+        js(p, f"document.querySelector('{home} .file-chip.is-loading button[aria-label=\"Stop adding long.mov\"]').click()")
+        time.sleep(2)
+        left = [d for d in (PROFILE / "ai" / "attachments").iterdir() if (d / ".carbonpart").exists() or (d / "long.mov").exists()]
+        check(len(chips(p, home)) == 3 and not js(p, "!!document.querySelector('.file-chip.is-loading')") and not left, f"x on a file still coming in stops it, and nothing of it is kept ({chips(p, home)}, {len(left)})")
+
+        # x removes one.
+        js(p, f"document.querySelector('{home} .file-chip button[aria-label=\"Remove dot.png\"]').click()")
+        check(until(lambda: len(chips(p, home)) == 2, 3), "x removes a file")
+        js(p, f"document.querySelector('{home} [aria-label=Message]').dispatchEvent(new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, clipboardData: {files_js([('dot.png', 'image/png', base64.b64encode(PNG).decode())])} }}))")
+        until(lambda: len(chips(p, home)) == 3, 10)
+        rpc(p, "capture", name="attach-chips.png")
+
+        # Send: the AI is told about each file and reads it.
+        js(p, f"(t => {{ t.focus(); document.execCommand('insertText', false, 'What should I do first?') }})(document.querySelector('{home} [aria-label=Message]'))")
+        js(p, f"document.querySelector('{home} [aria-label=Message]').dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }}))")
+        until(lambda: len(lines("results.jsonl")) >= 3, 30)
+        prompt = (lines("prompts.jsonl") or [{}])[-1].get("prompt", "")
+        check(re.search(r'\[Carbon\] The user attached 3 files: "notes.txt" \(' + str(len(NOTES.encode())) + r' B, id [a-f0-9]{16}\); "brief.pdf" \([\d.]+ (B|KB), id [a-f0-9]{16}\); "dot.png" \(' + str(len(PNG)) + r' B, id [a-f0-9]{16}\)\. Read each with read_attachment', prompt),
+              "The AI is told the files' names, sizes and ids, and to read them")
+        read = {r["id"]: r for r in lines("results.jsonl")}
+        by = {name: read.get(i, {}) for name, i in re.findall(r'"([^"]+)" \([^,]+, id ([a-f0-9]{16})\)', prompt)}
+        check(by.get("notes.txt", {}).get("type") == "text" and "Send invites by Friday" in by["notes.txt"].get("text", ""), "A text file reaches the AI as its text")
+        check("Quarterly revenue grew 12 percent" in by.get("brief.pdf", {}).get("text", ""), f"A PDF reaches it as the PDF's text ({by.get('brief.pdf', {}).get('text', '')[:120]!r})")
+        check(by.get("dot.png", {}).get("type") == "image" and by["dot.png"].get("mime") == "image/png" and by["dot.png"].get("data", 0) > 50, "An image reaches it as an image")
+        chat = until(lambda: next((c for c in chats() if not c.get("Running") and any(m["Role"] == "assistant" for m in c["Messages"])), None), 20) or {}
+        sent = next((m for m in chat.get("Messages", []) if m["Role"] == "user"), {})
+        check(chat.get("Title") == "What should I do first?", f"The chat is titled with what the user typed, not Carbon's note ({chat.get('Title')!r})")
+        check(sent.get("Text") == "What should I do first?" and [f["Name"] for f in sent.get("Files") or []] == ["notes.txt", "brief.pdf", "dot.png"], "The message keeps what was attached")
+        check(not chips(p, home) or not js(p, f"!!document.querySelector('{home}')"), "Sending empties the box")
+        shown = until(lambda: js(p, "[...document.querySelectorAll('.ai-msg.is-user .msg-files .file-chip')].map(c => c.innerText.replace(/\\s+/g, ' ').trim())"), 10) or []
+        check(len(shown) == 3 and shown[0] == f"notes.txt {len(NOTES.encode())} B", f"The chat shows them under the message ({shown})")
+        rpc(p, "capture", name="attach-sent.png")
+
+        # A follow-up from the chat's own box, with only a file: it says what to do with it, and a bad id fails cleanly.
+        box = ".chat-view"
+        until(lambda: js(p, f"!!document.querySelector('{box} [aria-label=Message]')"), 10)
+        done = len(lines("results.jsonl"))
+        js(p, f"window.__plan = {files_js([('plan.md', 'text/markdown', base64.b64encode(b'# Plan\\nShip it').decode())])}; (l => {{ l.dispatchEvent(new DragEvent('dragenter', {{ bubbles: true, cancelable: true, dataTransfer: window.__plan }})); l.dispatchEvent(new DragEvent('dragover', {{ bubbles: true, cancelable: true, dataTransfer: window.__plan }})) }})(document.querySelector('{box} .ai-log'))")
+        check(until(lambda: js(p, f"!!document.querySelector('{box} > .composer-drop')"), 3), "Dragging files over a chat lights up the whole chat")
+        check(js(p, f"document.querySelector('{box} > .composer-drop').offsetParent === document.querySelector('{box}')"), "...the chat, not the window around it")
+        rpc(p, "capture", name="attach-drop-chat.png")
+        js(p, f"document.querySelector('{box} .ai-log').dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, dataTransfer: window.__plan }}))")
+        check(until(lambda: chips(p, box) == ["plan.md 15 B"], 10) and not js(p, f"!!document.querySelector('{box} > .composer-drop')"), "...and a drop anywhere on it adds them to the chat's box")
+        js(p, f"(t => {{ t.focus(); document.execCommand('insertText', false, 'TRY A BAD ID') }})(document.querySelector('{box} [aria-label=Message]'))")
+        js(p, f"document.querySelector('{box} [aria-label=Message]').dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }}))")
+        until(lambda: len(lines("results.jsonl")) >= done + 2, 30)
+        later = lines("results.jsonl")[done:]
+        check(any(r["type"] == "text" and "Ship it" in r["text"] for r in later), "and the AI reads a file sent from there")
+        check(any(r["error"] and "No attachment has that id" in r["text"] for r in later), "An id that isn't an attachment is refused")
+
+        # Only a long paste: the AI gets it in the message, between marks, and the sent message shows it as a pill again.
+        asked = len(lines("prompts.jsonl"))
+        js(p, paste_text.format(box, json.dumps(TIDE)))
+        until(lambda: js(p, f"!!document.querySelector('{box} .paste-chip')"), 5)
+        js(p, f"document.querySelector('{box} [aria-label=Message]').dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', bubbles: true }}))")
+        until(lambda: len(lines("prompts.jsonl")) > asked, 30)
+        prompt = (lines("prompts.jsonl") or [{}])[-1].get("prompt", "")
+        check("Take a look at what I pasted.\n\n<pasted-text>\n" + TIDE + "\n</pasted-text>" in prompt, "The AI gets the paste in the message, between marks")
+        bubble = until(lambda: js(p, f"(m => m && m.querySelector('.paste-chip') && [m.querySelector('.paste-chip').innerText.replace(/\\s+/g, ' ').trim(), m.innerText.includes('High water')])([...document.querySelectorAll('{box} .ai-msg.is-user')].pop())"), 10) or []
+        check(bubble and bubble[0] == "Tide table, North Harbor. Pasted text" and not bubble[1], f"The sent message shows it as a pill, not the whole text ({bubble})")
+        sent_ids = [f["Id"] for c in chats() for m in c["Messages"] for f in m.get("Files") or []]
+        check(len(sent_ids) == 4 and all((PROFILE / "ai" / "attachments" / i).is_dir() for i in sent_ids), f"Carbon keeps each file in the profile's ai/attachments ({len(sent_ids)})")
+
+        # Deleting the chat deletes its files.
+        until(lambda: not next((c for c in chats() if c.get("Running")), None), 15)
+        send(p, "aiDeleteChat", id=chat.get("Id", ""))
+        check(until(lambda: not any((PROFILE / "ai" / "attachments" / i).exists() for i in sent_ids), 5), "Deleting the chat deletes its files")
+        # A file attached but never sent stays for its draft, and goes once it's 7 days old.
+        unsent = [d for d in (PROFILE / "ai" / "attachments").iterdir()]
+        rpc(p, "quit")
+        until(lambda: p.poll() is not None, 15)
+        p = launch(EXE, PROFILE)
+        until(lambda: js(p, "!!document.body.innerText.length"), 20)
+        time.sleep(2)
+        check(unsent and all(d.is_dir() for d in unsent), f"A file that was never sent stays after a restart, for its draft ({len(unsent)})")
+        rpc(p, "quit")
+        until(lambda: p.poll() is not None, 15)
+        week = time.time() - 8 * 86400
+        for d in unsent:
+            os.utime(d, (week, week))
+        p = launch(EXE, PROFILE)
+        until(lambda: js(p, "!!document.body.innerText.length"), 20)
+        check(until(lambda: not any((PROFILE / "ai" / "attachments").iterdir()), 5), "...and is gone once it's more than 7 days old")
+        real_clipboard(p)
+    finally:
+        try:
+            rpc(p, "quit")
+        except (RuntimeError, OSError):
+            pass
+        until(lambda: p.poll() is not None, 15)
+        if p.poll() is None:
+            p.kill()
+    print(f"\n{len(FAILED)} failed" if FAILED else "\nAll attach checks passed")
+    sys.exit(1 if FAILED else 0)
+
+
+if __name__ == "__main__":
+    main()

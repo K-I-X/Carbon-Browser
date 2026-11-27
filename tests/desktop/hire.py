@@ -1,0 +1,290 @@
+"""Hiring a companion: a "<name> joined your team" card (it celebrates, with a check badge, Start chatting and Not now),
+then its first chat, which it starts itself exactly once: from Start chatting or from "Say hi" the first time (also
+after setup). A hidden note starts it (never in the chat) with its Setup skill, whose "Used skill Setup" step comes first;
+then the companion's own message, with its face, and its other tools wait for that hello. Then it may ask one question (choices, or the user's own words, Send
+or Skip), and the answer goes to its memory. The title model names the chat from the hello. Talking to it first means
+it never kicks off; reopening never starts it again. No test stub ships: "Fake agent" lives only in test profiles.
+
+No AI plan is used: exchange.py's fake agent plays each companion and asks its question through Carbon's ask_user.
+
+Run: python tests/desktop/hire.py artifacts/Carbon-QA/Carbon.exe
+Out: artifacts/hire-*/ (hire-*.png in each profile folder)
+"""
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import uuid
+
+sys.path.insert(0, str(Path(__file__).parent))
+from qa import CREW, ROOT, companions_page, js, launch, launcher, rpc, send, until  # noqa: E402
+import exchange as X  # noqa: E402  its fake agent: what each companion says comes from plan.json, and it can call Carbon's tools
+import welcome as W  # noqa: E402  setup's steps
+
+EXE = Path(sys.argv[1]).resolve()
+RUN = ROOT / "artifacts" / ("hire-" + uuid.uuid4().hex[:8])
+BIN = X.BIN = RUN / "bin"
+FAILED = []
+KICK = "They haven't written yet, so start the chat yourself now"  # the kickoff's activation note (a first message gets a different one)
+SRC = Path(__file__).resolve().parents[2]
+
+
+def check(ok, name):
+    print(("PASS " if ok else "FAIL ") + name, flush=True)
+    if not ok:
+        FAILED.append(name)
+
+
+def kickoffs(name):
+    return [q for q in X.prompts() if q["name"] == name and KICK in q["prompt"]]
+
+
+def mates(profile):
+    for _ in range(50):  # Carbon swaps the file in atomically, so a read can land mid-swap
+        try:
+            return {c["Name"]: c for c in json.loads((profile / "state.json").read_text(encoding="utf-8"))["Preferences"]["Companions"]}
+        except (OSError, ValueError, KeyError):
+            time.sleep(.1)
+    return {}
+
+
+def memory(profile, name):
+    file = profile / "companions" / mates(profile).get(name, {}).get("Id", "-") / "memory.json"
+    return file.read_text(encoding="utf-8") if file.exists() else ""
+
+
+def first_chat(profile, name):
+    """The companion's first chat: its oldest (the list is newest first)."""
+    try:
+        mine = [c for c in json.loads((profile / "ai" / "chats.json").read_text(encoding="utf-8")) if c["Companion"] == mates(profile).get(name, {}).get("Id")]
+        return mine[-1] if mine else None
+    except (OSError, ValueError):
+        return None
+
+
+def opening(p):
+    """The first thing in the open chat after Setup's step: a companion message, with the face that opens the turn, or what else is there."""
+    return js(p, "(() => { const all = [...document.querySelectorAll('.chat-view .chat-column > *')], f = all.find(e => !/^\\s*Used skill Setup\\s*$/.test(e.innerText)); return f && { message: !!f.matches('.ai-turn') && !!f.querySelector(':scope > .ai-msg.is-assistant'), face: !!all[0].querySelector(':scope > .ai-turn-face .face, :scope > .ai-turn-face img, :scope > .ai-turn-face canvas, :scope > .ai-turn-face'),"
+                 " text: f.innerText.slice(0, 160), all: document.querySelector('.chat-view')?.innerText ?? '' } })()")
+
+
+def shown(p, selector):
+    return js(p, f"!!document.querySelector({json.dumps(selector)})")
+
+
+def click(p, selector, words=""):
+    return js(p, f"(() => {{ const e = [...document.querySelectorAll({json.dumps(selector)})].find(e => (e.innerText + ' ' + (e.getAttribute('aria-label') ?? '')).includes({json.dumps(words)})); e?.click(); return !!e }})()")
+
+
+def card(p):
+    return js(p, "(() => { const c = document.querySelector('.joined-card'); return c && { title: c.querySelector('[data-slot=dialog-title]')?.innerText, line: c.querySelector('[data-slot=dialog-description]')?.innerText,"
+                 " buttons: [...c.querySelectorAll('.joined-actions button')].map(b => b.innerText.trim()), mascot: !!c.querySelector('.crew-dialog-hero .mascot'), badge: !!c.querySelector('.joined-badge svg') } })()")
+
+
+def say_hi(p, name):
+    send(p, "new")
+    until(lambda: shown(p, ".home-face") and not shown(p, ".mate-grid"), 10)
+    companions_page(p)
+    return until(lambda: js(p, f"(() => {{ const b = [...document.querySelectorAll('.mate-card')].find(c => c.querySelector('h3')?.innerText === {json.dumps(name)})?.querySelector('.mate-chat'); b?.click(); return !!b }})()"), 5)
+
+
+ROLES = {"Leo": "Marketing", "Talia": "Growth", "Nora": "Planner", "Ivan": "Engineer"}  # each one is introduced role first
+
+
+def library_add(p, name):
+    send(p, "new")
+    until(lambda: shown(p, ".home-face"), 15)
+    js(p, "document.querySelector('.mate-switch-more[aria-label=\"Hire a companion\"]')?.click()")
+    until(lambda: shown(p, ".companion-library"), 5)
+    click(p, ".library-add", f"Hire {ROLES[name]} {name}")
+    return until(lambda: (card(p) or {}).get("title") == f"{ROLES[name]} {name} joined your team", 5)
+
+
+def asked(p):
+    return js(p, "(() => { const q = document.querySelector('.ask-card'); return q && { text: q.querySelector('.ask-q p')?.innerText, options: [...q.querySelectorAll('.ask-option span')].map(s => s.innerText),"
+                 " own: q.querySelector('.ask-own input')?.placeholder, buttons: [...q.querySelectorAll('.ask-own button')].map(b => b.innerText.trim()) } })()")
+
+
+def fake_agent(profile):
+    (profile / "agents").mkdir(parents=True)
+    (profile / "agents" / "fake.json").write_text(json.dumps({"id": "fake", "name": "Fake agent", "enabled": True, "command": str(BIN / "fakeagent"),
+        "detect": ["status"], "expect": "signed in", "run": ["run", "--mcp", "{mcpConfig}"], "resume": ["--resume", "{session}"], "output": "stream-json"}))
+
+
+def ask(question, options, hello="Hi Sam! First up, a launch plan for your spring catalog. I'm pulling your recent posts now."):
+    """A kickoff the way the role asks for it: its hello first, then (if it must) one question."""
+    return {"say": hello, "calls": [{"name": "ask_user", "arguments": {"question": question, "options": options}}], "text": "Got it. Drafting the first week now."}
+
+
+def hiring():
+    profile = RUN / "hiring"
+    fake_agent(profile)
+    (profile / "state.json").write_text(json.dumps({"UiVersion": 6, "Welcome": False, "Preferences": {"Companions": [{**CREW[0], "Crew": "research"}], "AgentsEnabled": True, "AiHarness": "fake",
+        "Width": 1280, "Height": 860}, "Tabs": [{"Id": "home", "Title": "Home", "Url": "about:blank"}], "ActiveId": "home"}))
+    X.plan({"Leo": [ask("Where do you post most?", ["LinkedIn", "Instagram", "Your newsletter"]), {"text": "On it."}],
+            "Talia": [ask("Which channel should I size first?", ["Search", "Referrals"]), {"text": "On it."}], "Nora": [{"text": "Hello back."}],
+            # Ivan reaches for a tool before saying anything: Carbon holds it until its hello, and the step never shows first.
+            "Ivan": [{"steps": True, "calls": [{"name": "ask_user", "arguments": {"question": "Which site should I test?", "options": ["Shop", "Blog"]}}],
+                      "text": "Hi Sam! I'm Ivan. I'll start by smoke-testing the site you have open."}],
+            "nobody": [{"text": "Spring catalog launch"}, {"text": "Sizing the first channel"}, {"text": "Hello Nora"}, {"text": "Smoke-testing your site"}]})  # the title model
+    p = launch(EXE, profile, env={**os.environ, "CARBON_QA_TITLES": "1"})  # test builds only name chats when asked to
+    try:
+        # Hire from the library: the card, and nothing starts until the user says so.
+        check(library_add(p, "Leo"), "Hiring Leo from the library says Leo joined your team")
+        got = card(p) or {}
+        check(got.get("buttons") == ["Not now", "Start chatting"] and got.get("mascot") and got.get("badge") and "first task" in (got.get("line") or ""),
+              f"The card has Leo celebrating with a check, a line on what's next, Not now and Start chatting ({got})")
+        check(until(lambda: mates(profile).get("Leo", {}).get("Setup") == "pending", 5), "Leo is new: its first chat is still to come")
+        time.sleep(1.2)
+        rpc(p, "capture", name="hire-joined.png")
+        click(p, ".joined-card button", "Not now")
+        check(until(lambda: not shown(p, ".joined-card"), 3) and shown(p, ".companion-library"), "Not now closes the card and leaves the library open")
+        time.sleep(2)
+        check(not kickoffs("Leo"), "and starts nothing")
+        W.key(p, "Escape")
+
+        # Say hi the first time: Leo opens the chat itself with its own message, then one question, and no message from the user.
+        check(say_hi(p, "Leo"), "Say hi on the Companions page")
+        check(until(lambda: len(kickoffs("Leo")) == 1, 20), "Leo starts its first chat itself")
+        first = until(lambda: (o := opening(p)) and o.get("message") and o, 20) or {}
+        check(first.get("message") and first.get("face") and first.get("text", "").startswith("Hi Sam! First up"), f"After Setup's step, under Leo's face, the first thing in the chat is Leo's own message ({first.get('text')!r})")
+        check(first and "[Carbon]" not in first.get("all", "") and "This is your first chat" not in first.get("all", ""), "The hidden note that started it never shows in the chat")
+        got = until(lambda: (asked(p) or {}).get("options") and asked(p), 20) or {}
+        check(got.get("text") == "Where do you post most?" and got.get("options") == ["LinkedIn", "Instagram", "Your newsletter"]
+              and got.get("own") == "Or tell me what you're deciding…" and got.get("buttons") == ["Skip", "Send"],
+              f"It asks one question: three choices, or your own words, Send or Skip ({got})")
+        check("Getting started" not in (js(p, "document.body.innerText") or "x"), "No made-up title: until it's named, the chat goes by Leo's name")
+        check(js(p, "document.querySelector('.chat-view')?.getAttribute('aria-label')") == "Chat with Leo", "Its chat is open in a tab")
+        prompt = kickoffs("Leo")[0]["prompt"]
+        check(prompt.count('[Skill "Setup"') == 1 and "Open with your own words" in prompt and "# Marketing" in prompt and "Sound like the user" in prompt,
+              "Its hidden first turn carries the Setup skill once, with its role's setup")
+        time.sleep(.8)
+        rpc(p, "capture", name="hire-kickoff.png")
+        click(p, ".ask-option", "Instagram")
+        check(until(lambda: any(m["Role"] == "user" and "Instagram" in m["Text"] for m in (first_chat(profile, "Leo") or {}).get("Messages", [])), 10) and "Instagram" not in memory(profile, "Leo"),
+              "The answer goes to Leo as the user's message, and Carbon doesn't save it for Leo (its Setup decides what to keep)")
+        check(until(lambda: (first_chat(profile, "Leo") or {}).get("Title") == "Spring catalog launch", 15), f"The title model names the chat from Leo's hello ({(first_chat(profile, 'Leo') or {}).get('Title')!r})")
+        check(any(q["name"] == "nobody" and "First up, a launch plan" in q["prompt"] for q in X.prompts()), "and it's given the hello, not the hidden note")
+        chat = first_chat(profile, "Leo") or {}
+        said = chat.get("Messages", [])
+        check(len(said) > 1 and said[0]["Role"] == "tool" and said[0]["Text"] == "Used skill Setup" and said[1]["Role"] == "assistant" and [m["Role"] for m in said].count("user") == 1 and said[[m["Role"] for m in said].index("user")]["Text"] == "Instagram"
+              and not [m for m in said if "[Carbon]" in m["Text"]], f"Saved: Setup's step, then Leo spoke first, the user's only message is their answer, and the note isn't there ({[m['Role'] for m in said]})")
+        check(until(lambda: mates(profile).get("Leo", {}).get("Setup") == "done", 5), "and Leo isn't new anymore")
+
+        # Reopening never starts it again.
+        check(say_hi(p, "Leo"), "Say hi again")
+        send(p, "aiKickoff", companion=mates(profile)["Leo"]["Id"])
+        send(p, "chatOpen", id=chat.get("Id"))
+        js(p, "location.reload()")
+        time.sleep(4)
+        check(len(kickoffs("Leo")) == 1, f"Saying hi again, reopening its chat or reloading doesn't start it again ({len(kickoffs('Leo'))})")
+
+        # Start chatting: right away, once, even when pressed twice.
+        check(library_add(p, "Talia"), "Hiring Talia says Talia joined")
+        click(p, ".joined-card button", "Start chatting")
+        send(p, "aiKickoff", companion=until(lambda: mates(profile).get("Talia", {}).get("Id"), 5))
+        check(until(lambda: not shown(p, ".companion-library") and not shown(p, ".joined-card"), 5), "Start chatting closes the card and the library")
+        check(until(lambda: len(kickoffs("Talia")) == 1, 20) and until(lambda: (asked(p) or {}).get("text") == "Which channel should I size first?", 20), "and Talia starts its first chat, asking its question")
+        js(p, "document.querySelector('.ask-own input')?.focus()")
+        W.type_into(p, ".ask-own input", "Whichever brings the biggest accounts")
+        js(p, "document.querySelector('.ask-own button[type=submit]')?.click()")
+        check(until(lambda: any(m["Role"] == "user" and "biggest accounts" in m["Text"] for m in (first_chat(profile, "Talia") or {}).get("Messages", [])), 10), "Your own words go to it too")
+        time.sleep(3)
+        check(len(kickoffs("Talia")) == 1, "Pressed twice, it still starts once")
+
+        # Talk to it first: it never kicks off.
+        check(library_add(p, "Nora"), "Hiring Nora says Nora joined")
+        click(p, ".joined-card button", "Not now")
+        W.key(p, "Escape")
+        nora = until(lambda: mates(profile).get("Nora", {}).get("Id"), 5)
+        send(p, "new")
+        until(lambda: shown(p, ".home-compose [aria-label=Message]"), 10)
+        send(p, "aiSend", text="Hello Nora", home=True, companion=nora)
+        until(lambda: any(q["name"] == "Nora" for q in X.prompts()), 20)
+        say_hi(p, "Nora")
+        time.sleep(4)
+        said = [q["prompt"][-200:] for q in X.prompts() if q["name"] == "Nora"]
+        check(not kickoffs("Nora") and mates(profile).get("Nora", {}).get("Setup") == "done", f"Talking to a new companion first means it never kicks off ({said}, {mates(profile).get('Nora', {}).get('Setup')})")
+
+        # A tool before the hello: Carbon holds it, then refuses, so the chat still opens with Ivan's words.
+        check(library_add(p, "Ivan"), "Hiring Ivan says Ivan joined")
+        click(p, ".joined-card button", "Start chatting")
+        refused = until(lambda: X.calls("Ivan", "ask_user"), 20) or []
+        check(refused and refused[0]["error"] and "Write your hello first" in refused[0]["text"], f"Asking before saying hello is refused ({refused[:1]})")
+        first = until(lambda: (o := opening(p)) and o.get("message") and o, 20) or {}
+        check(first.get("message") and first.get("text", "").startswith("Hi Sam! I'm Ivan"), f"The chat still opens with Ivan's message, not a step or a question card ({first.get('text')!r})")
+        said = (until(lambda: (c := first_chat(profile, "Ivan")) and c.get("Messages") and c, 10) or {}).get("Messages", [])
+        check(len(said) > 1 and said[0]["Text"] == "Used skill Setup" and said[1]["Role"] == "assistant" and not shown(p, ".ask-card"), f"and nothing but Setup's step comes before it ({[m['Role'] for m in said]})")
+    finally:
+        rpc(p, "quit")
+        until(lambda: p.poll() is not None, 15)
+
+
+def after_setup():
+    """Setup in four steps, hiring your own companion, then Not now, just browse: its first chat waits until you open it,
+    then it starts it itself, once."""
+    profile = RUN / "setup"
+    fake_agent(profile)
+    X.plan({"Pip": [ask("What are you researching this month?", ["Suppliers", "Competitors", "A trip"]), {"text": "On it."}],
+            "nobody": W.made_lines("Research suppliers and competitors for my shop.")})  # Create's chat, before Pip has a name on file
+    p = launch(EXE, profile)
+    try:
+        until(lambda: shown(p, ".welcome.ob .ob-dots"), 20)
+        if until(lambda: shown(p, ".intro"), 3):
+            time.sleep(1)
+            W.key(p, " ")
+            until(lambda: not shown(p, ".intro"), 3)
+        time.sleep(2.5)
+        W.to_create(p)
+        W.make(p, "Pip", "Research suppliers and competitors for my shop.")
+        time.sleep(1)
+        W.click(p, ".ob-next")  # Hire Pip
+        check(until(lambda: (card(p) or {}).get("title") == "Pip joined your team", 6), "Hire Pip shows the joined card")
+        click(p, ".joined-actions button", "Start chatting")
+        check(until(lambda: W.step_now(p) == 4, 5) and not kickoffs("Pip"), "Then setup's first task, nothing started yet")
+        time.sleep(1.5)
+        W.click(p, ".ob-browse")
+        check(until(lambda: not shown(p, ".welcome.ob:not(.is-hidden)"), 6), "Not now, just browse finishes setup")
+        time.sleep(4)
+        check(not kickoffs("Pip") and not first_chat(profile, "Pip"), "and Pip waits: no chat starts by itself")
+        say_hi(p, "Pip")
+        check(until(lambda: len(kickoffs("Pip")) == 1, 20) and until(lambda: (asked(p) or {}).get("text") == "What are you researching this month?", 20),
+              "Opening Pip's chat starts it, with its question")
+        time.sleep(.8)
+        rpc(p, "capture", name="hire-after-setup.png")
+        click(p, ".ask-option", "Suppliers")
+        check(until(lambda: any(m["Role"] == "user" and "Suppliers" in m["Text"] for m in (first_chat(profile, "Pip") or {}).get("Messages", [])), 10), "The answer goes to Pip")
+        js(p, "location.reload()")
+        time.sleep(2)
+        say_hi(p, "Pip")
+        time.sleep(4)
+        check(len(kickoffs("Pip")) == 1, "Reloading or saying hi doesn't start it again")
+    finally:
+        rpc(p, "quit")
+        until(lambda: p.poll() is not None, 15)
+
+
+def main():
+    BIN.mkdir(parents=True)
+    (BIN / "fake_agent.py").write_text(X.FAKE, encoding="utf-8")
+    launcher(BIN / "fakeagent", BIN / "fake_agent.py")
+    hiring()
+    for f in ("prompts.jsonl", "calls.jsonl"):
+        for _ in range(50):  # the last companion's agent may still be letting go of it
+            try:
+                (BIN / f).unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.2)
+    after_setup()
+    # No test stub ships: the fake agent and its plan line exist only in test profiles.
+    stub = [str(f.relative_to(SRC)) for f in [*SRC.glob("carbon/Shell/assets/*.js"), *SRC.glob("carbon/*.cs"), *SRC.glob("carbon/Agents/*.cs"), *SRC.glob("mac/Sources/Carbon/*.swift"), *SRC.glob("carbon-ui/src/*.tsx")]
+            if any(w in f.read_text(encoding="utf-8", errors="replace").lower() for w in ("fake agent", "fakeagent"))]
+    check(not stub, f"No fake agent in the app's code or its built UI ({stub})")
+    print(f"\n{len(FAILED)} failed" if FAILED else "\nAll hire checks passed")
+    sys.exit(1 if FAILED else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,38 @@
+{
+ "idle_a": {
+  "frames": 180,
+  "fps": 15,
+  "loop": true,
+  "rows": 2
+ },
+ "working": {
+  "frames": 54,
+  "fps": 15,
+  "loop": true
+ },
+ "thinking": {
+  "frames": 66,
+  "fps": 15,
+  "loop": false
+ },
+ "nod": {
+  "frames": 24,
+  "fps": 15,
+  "loop": false
+ },
+ "shrug": {
+  "frames": 33,
+  "fps": 15,
+  "loop": false
+ },
+ "wave": {
+  "frames": 45,
+  "fps": 15,
+  "loop": false
+ },
+ "yes": {
+  "frames": 19,
+  "fps": 15,
+  "loop": false
+ }
+}

@@ -1,0 +1,130 @@
+using System.IO;
+using System.Windows;
+using System.Threading;
+namespace Carbon;
+public partial class App : Application
+{
+ public static string DataRoot { get; private set; } = "";
+ public static bool IsQa { get; private set; }
+ public static bool IsTemp { get; private set; } // a throwaway profile an MCP agent opened: no cookies, logins or history
+ public static string ProfileHome { get; private set; }="";
+ private static Task<Microsoft.Web.WebView2.Core.CoreWebView2Environment>? browserEnvironment;
+ public static Task<Microsoft.Web.WebView2.Core.CoreWebView2Environment> BrowserEnvironment => browserEnvironment ??= Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null,Path.Combine(DataRoot,"WebView"),new(){AreBrowserExtensionsEnabled=true,EnableTrackingPrevention=true,
+  // Play audio from the engine's main process (a direct child of Carbon.exe) instead of a separate audio-service
+  // process one level deeper, so per-app audio tools (Discord screen share, SteelSeries Sonar, OBS) can find it.
+  // GPU and network keep their own processes. Merged into the main one they saved ~190 MB, but then a GPU crash
+  // (an extension capturing the page, a driver hiccup) took down the whole engine and every window with it.
+  // Video is drawn by the engine, not handed to the graphics card as an overlay: NVIDIA overlays could freeze a
+  // fullscreen YouTube picture (looking paused) while the sound played on.
+  AdditionalBrowserArguments="--disable-features=AudioServiceOutOfProcess --disable-direct-composition-video-overlays"+(IsQa?(Environment.GetEnvironmentVariable("CARBON_QA_SOUND")==null?" --mute-audio ":" ")+Environment.GetEnvironmentVariable("CARBON_QA_BROWSER_ARGS"):"")});
+ private Mutex? instance;
+ private IDisposable? linkListener, launcherListener;
+ internal static string InstanceName(string folder)=>"Local\\Carbon-"+Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar).ToLowerInvariant())))[..20];
+ internal static string[] StartArgs = [];
+ /// Windows starts Carbon for a link as `--link <address>`. Whatever the link says, it's one address and never a setting for Carbon.
+ internal static string[] LinkArgs(string[] args) => args.FirstOrDefault() != "--link" ? args : args.Length == 2 && !args[1].StartsWith('-') ? [args[1]] : [];
+ static string? ArgAfter(string[] args, string flag) { int i = Array.IndexOf(args, flag); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
+ internal static void ConfigureProfile(string[] args)
+ {
+  var profile = Array.IndexOf(args, "--profile");
+  DataRoot = profile >= 0 && args.Length > profile + 1 ? Path.GetFullPath(args[profile + 1]) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Carbon");
+  int root = Array.IndexOf(args, "--profiles-root");
+  ProfileHome = root >= 0 && args.Length > root + 1 ? Path.GetFullPath(args[root + 1]) : DataRoot;
+  if (profile < 0) DataRoot = ProfileCatalog.Folder(ProfileCatalog.Read().Single(p => p.Id == ProfileCatalog.LaunchId));
+ }
+ protected override void OnStartup(StartupEventArgs e)
+ {
+  base.OnStartup(e);
+  StartupMetrics.Mark("app-startup");
+#if CARBON_QA
+  IsQa = StartArgs.Contains("--qa");
+#endif
+  IsTemp = StartArgs.Contains("--temp"); launchArgs = StartArgs;
+  try { ConfigureProfile(StartArgs); } catch(Exception ex) { MessageBox.Show(ex.Message,"Carbon");Shutdown();return; }
+  var launchUrl = BrowserRegistration.UrlFromArgs(StartArgs);
+  // `Carbon.exe --mcp`: run only the MCP stdio server (launched by AI apps); no window.
+  if (StartArgs.FirstOrDefault() == "--cli") { var cliArgs = StartArgs.Skip(1).ToArray(); new Thread(() => { int code = 1; try { code = McpServer.Cli(InstanceName(DataRoot), cliArgs); } finally { Dispatcher.Invoke(() => Shutdown(code)); } }) { IsBackground = true }.Start(); return; }
+  if (StartArgs.Contains("--mcp")) { new Thread(() => { try { McpServer.RunId = ArgAfter(StartArgs, "--run") ?? ""; McpServer.NoTools = StartArgs.Contains("--no-tools"); McpServer.NoPlugins = StartArgs.Contains("--no-plugins"); McpServer.Run(InstanceName(DataRoot), ArgAfter(e.Args, "--as"), e.Args.Contains("--this-profile")); } finally { Dispatcher.Invoke(Shutdown); } }) { IsBackground = true }.Start(); return; }
+  instance = new Mutex(true, InstanceName(DataRoot), out var first);
+  if (!first) {
+   // Already running: hand the link (or a plain "bring to front") to the open window.
+   if (!StartArgs.Contains("--startup") && !BrowserRegistration.Forward(InstanceName(DataRoot), launchUrl))
+    MessageBox.Show("Carbon is already open. Look for it in your taskbar.", "Carbon");
+   Shutdown(); return;
+  }
+  Directory.CreateDirectory(DataRoot);
+  StartupMetrics.Mark("profile-ready");
+  // Accept links before constructing the window. Dispatcher callbacks wait until it is ready.
+  Action<string> open = url => Dispatcher.BeginInvoke(() => {
+   if ((Carbon.MainWindow.Windows.Exists(w => w.IsVisible) ? Carbon.MainWindow.Home : MainWindow as Carbon.MainWindow) is { } target) target.OpenFromOutside(url); // a normal window, never a sign-in one
+  });
+  try {
+   linkListener = BrowserRegistration.Listen(InstanceName(DataRoot), open);
+   if (!StartArgs.Contains("--profile") && !IsQa) launcherListener = BrowserRegistration.ListenForLauncher(open);
+  } catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { Log(ex); } // someone else holds the name: Carbon still opens, links start it instead
+  _ = BrowserEnvironment.ContinueWith(t => t.Result.BrowserProcessExited += (_, ev) => {
+   if (ev.BrowserProcessExitKind == Microsoft.Web.WebView2.Core.CoreWebView2BrowserProcessExitKind.Failed) Dispatcher.BeginInvoke(RestartAfterEngineCrash);
+  }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.FromCurrentSynchronizationContext()); // start the engine while the window is still being built
+  _ = AppContent.ShellFolder;
+  StartupMetrics.Mark("environment-requested");
+  try{var stale=Path.Combine(DataRoot,"ImportSnapshot");if(Directory.Exists(stale))Directory.Delete(stale,true);}catch(IOException){}catch(UnauthorizedAccessException){}
+  // Crashes off the UI thread and UI freezes were never recorded; log them so a "random crash" leaves a trace.
+  AppDomain.CurrentDomain.UnhandledException += (_, ev) => Log(ev.ExceptionObject as Exception ?? new Exception("Unhandled: " + ev.ExceptionObject));
+  TaskScheduler.UnobservedTaskException += (_, ev) => { Log(ev.Exception); ev.SetObserved(); };
+  WatchForFreezes();
+  DispatcherUnhandledException += (_, ev) => { Log(ev.Exception); MessageBox.Show("Carbon couldn't finish that action. Your saved tabs are kept.\n\n" + ev.Exception.Message, "Carbon"); ev.Handled = true; };
+  var window = new MainWindow { ShowActivated=!IsQa, LaunchUrl = launchUrl }; MainWindow = window; window.Show();
+  _ = Dispatcher.InvokeAsync(BrowserRegistration.Register, System.Windows.Threading.DispatcherPriority.ContextIdle);
+  Carbon.MainWindow.StartAgentServer(InstanceName(DataRoot));
+ }
+ // What the UI thread was last asked to do; written to the log if it freezes.
+ public static volatile string Breadcrumb = "startup";
+ void WatchForFreezes()
+ {
+  var ui = Dispatcher;
+  new System.Threading.Thread(() => {
+   while (true) {
+    System.Threading.Thread.Sleep(2000);
+    if (ui.HasShutdownStarted) return; // quitting stops the UI thread on purpose; that isn't a freeze
+    var ping = ui.BeginInvoke(System.Windows.Threading.DispatcherPriority.Send, () => { });
+    if (ping.Wait(TimeSpan.FromSeconds(5)) == System.Windows.Threading.DispatcherOperationStatus.Completed) continue;
+    string during = Breadcrumb; var started = DateTime.Now.AddSeconds(-5);
+    ping.Wait();
+    if (ui.HasShutdownStarted) return;
+    Log(new TimeoutException($"Carbon froze for {(DateTime.Now - started).TotalSeconds:0.0}s while handling: {during}"));
+   }
+  }) { IsBackground = true, Name = "Freeze watchdog" }.Start();
+ }
+ public static void Log(Exception ex) { try { File.AppendAllText(Path.Combine(DataRoot, "errors.log"), DateTime.Now.ToString("s") + " " + ex + Environment.NewLine); } catch { } }
+ static string[] launchArgs = [];
+ bool restarting;
+ // The engine's main process died: every page and Carbon's own UI died with it, and each click would only show an
+ // error. Save the tabs and start Carbon again. If it already crashed right after such a restart, stop instead.
+ void RestartAfterEngineCrash()
+ {
+  if (restarting || Dispatcher.HasShutdownStarted) return;
+  restarting = true;
+  Log(new Exception("The browser engine crashed; restarting Carbon."));
+  try { (Carbon.MainWindow.Windows.FirstOrDefault() ?? MainWindow as Carbon.MainWindow)?.Save(); } catch (Exception ex) { Log(ex); }
+  if (launchArgs.Contains("--recovered") && DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime < TimeSpan.FromSeconds(90)) {
+   MessageBox.Show("Carbon's browser engine keeps crashing, so Carbon closed. Your tabs are saved; open Carbon again to continue.", "Carbon");
+   Environment.Exit(1);
+  }
+  linkListener?.Dispose(); launcherListener?.Dispose();
+  try { instance?.ReleaseMutex(); } catch (ApplicationException) { }
+  instance?.Dispose();
+  var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+  foreach (var arg in launchArgs.Where(a => a != "--recovered" && !a.Contains("://"))) start.ArgumentList.Add(arg);
+  start.ArgumentList.Add("--recovered");
+  System.Diagnostics.Process.Start(start);
+  Environment.Exit(0);
+ }
+ protected override void OnExit(ExitEventArgs e)
+ {
+  linkListener?.Dispose(); launcherListener?.Dispose(); instance?.Dispose();
+  // A temporary profile is deleted once its browser processes have let go of the files (the next temp window sweeps leftovers).
+  if (IsTemp && DataRoot.StartsWith(Path.Combine(Path.GetTempPath(), "Carbon-temp"), StringComparison.OrdinalIgnoreCase))
+   System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), $"/d /c for /l %i in (1,1,15) do @if exist \"{DataRoot}\" (ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{DataRoot}\" 2>nul)") { CreateNoWindow = true, UseShellExecute = false });
+  base.OnExit(e);
+ }
+}

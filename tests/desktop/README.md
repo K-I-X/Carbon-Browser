@@ -1,0 +1,58 @@
+# Desktop regression checks
+
+Use Windows x64, Python 3, .NET 10, and the WebView2 Evergreen Runtime. These scripts launch **QA builds only** with fresh profiles under ignored `artifacts/` directories. Run desktop scripts sequentially so they do not compete for focus or distort startup timings. Do not distribute a QA executable.
+
+Build the QA executable:
+
+```powershell
+.\build.ps1 -Qa
+```
+
+The extension fixture needs a public store package to obtain a developer public key. Download the official Cold Turkey package without installing it in your normal profile:
+
+```powershell
+Invoke-WebRequest 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=140.0&acceptformat=crx2,crx3&x=id%3Dpganeibhckoanndahmnfggfoeofncnii%26uc' -OutFile artifacts/cold-turkey.crx
+dotnet run --project tests/Carbon.PerformanceChecks -c Release -- artifacts/cold-turkey.crx pganeibhckoanndahmnfggfoeofncnii
+python tests/desktop/features.py artifacts/Carbon-QA/Carbon.exe --cold-turkey
+python tests/desktop/performance.py artifacts/Carbon-QA/Carbon.exe
+```
+
+`features.py` checks download opening, embedded reader/login scripts, extension identity, service workers, storage, content scripts, real tab queries, native messaging, and simultaneous external links. Its temporary file association and native messaging registration use unique names and are removed in `finally`. The optional official Cold Turkey check stops at the consent screen; it does not consent, change blocking rules, or verify actual blocking.
+
+`performance.py` measures the entire app process tree, compares loaded and idle resident RAM, and checks page state, navigation history, cookies, local storage, session saving, and disabling memory saver. It then waits another idle period to check that muted video and WebRTC stay awake. Each idle period lasts 75 seconds. Resident RAM and private committed allocations are recorded separately. Live/shared renderers are deliberately protected, so the idle-page RAM reduction is not a promise for media workloads.
+
+For a baseline comparison, build the earlier commit with `-p:CarbonQa=true` and pass both single-file executables:
+
+```powershell
+python tests/desktop/startup.py artifacts/baseline-qa-single/Carbon.exe artifacts/Carbon-QA/Carbon.exe --cold-bundle
+```
+
+This runs four sequential launch/quit cycles per executable. Cycle zero uses a new profile and a fresh native extraction directory; the next cycles reuse them. It measures visible-window time, usable-page/interface time, and links delivered to a running instance. Startup timing depends on machine load and WebView runtime caching.
+
+After publishing a **production** build, verify that QA code is absent and its embedded UI/scripts match source:
+
+```powershell
+dotnet run --project tests/Carbon.ReleaseChecks -c Release -- carbon/bin/Release/net10.0-windows/win-x64/Carbon.dll .
+```
+
+Profiles, downloaded packages, test native hosts, binaries, and results stay in `artifacts/` and must not be committed.
+
+Tab overflow regression (checks inline button placement with three tabs, clicks through to thirty in a short window, checks resizing and mouse-wheel access in both layouts, Ctrl T, and session saving):
+
+```powershell
+python tests/desktop/tabs.py artifacts/Carbon-QA/Carbon.exe
+```
+
+Agent control regression checks (`--cli help` snapshot, `as=` required, approval bar for a new caller, block for the session, the per-profile switch, private tabs hidden from `list_tabs`, and `profile=temp`). `--cli` always targets the default profile, so only its offline behavior runs; the rest goes through `--mcp --profile`, which shares the same call path. After an intended change to the tool list, refresh the snapshot with `--update-snapshot`.
+
+```powershell
+python tests/desktop/agents.py artifacts/Carbon-QA/Carbon.exe
+```
+
+Performance baseline for `docs/agentic/PERF.md` (cold start, idle RAM with 1 and 10 tabs, tab-switch latency; about 6 minutes for 3 runs):
+
+```powershell
+python tests/desktop/baseline.py artifacts/Carbon-QA/Carbon.exe 3
+```
+
+Set `CARBON_QA_POS=x,y` to open test windows at a fixed spot (for example on a second monitor) without taking focus.

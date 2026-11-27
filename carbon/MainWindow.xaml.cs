@@ -1,0 +1,677 @@
+using System.IO;
+using System.Diagnostics;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+using System.Runtime.InteropServices;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
+using Microsoft.Win32;
+
+namespace Carbon;
+public partial class MainWindow : Window
+{
+ StateStore store => sharedStore;
+ readonly SavedState state;
+ readonly List<BrowserTab> tabs = [];
+ readonly Stack<BrowserTab> closedTabs = [];
+ readonly List<DownloadItem> downloads = [];
+ readonly DispatcherTimer saveTimer = new() { Interval = TimeSpan.FromMilliseconds(450) };
+ readonly DispatcherTimer toastTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+ // Each incognito window has its own InPrivate session, so two never share a sign-in; private tabs in a normal window share one.
+ readonly string ownPrivateProfile = "Private" + Guid.NewGuid().ToString("N");
+ string privateProfile => incognito ? ownPrivateProfile : sharedPrivateProfile;
+ internal const string CompanionEngine = "Companion"; // the companion profile's WebView2 profile (Where companions browse)
+ string EngineOf(BrowserTab tab) => tab.Private ? privateProfile : tab.Engine ?? "Default";
+ BrowserTab? active;
+ bool dark, closing, focusMode;
+ string panel = "";
+ Preferences Prefs => state.Preferences;
+ [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+ public MainWindow() : this(secondaryWindow: false) { }
+ MainWindow(bool secondaryWindow)
+ {
+  InitializeComponent();
+  StartupMetrics.Mark("window-xaml");
+  Frame.Visibility=Visibility.Collapsed;Background=Brushes.Black;
+  secondary = secondaryWindow;
+  Windows.Add(this);
+  Activated += (_, _) => LastActive = this;
+  state = sharedState ??= store.Load();
+  StartupMetrics.Mark("session-loaded");
+  if(state.UiVersion==0){state.Welcome=true;state.SeenVersion=CurrentVersion.ToString(3);} // brand-new install: the welcome setup, not What's New
+  if(App.IsQa&&Environment.GetEnvironmentVariable("CARBON_QA_WHATSNEW")==null)state.SeenVersion=CurrentVersion.ToString(3); // tests see What's New only when they ask
+  if(state.UiVersion<2){if(state.UiVersion>0)state.Preferences.Theme="Dark";state.UiVersion=2;} // new installs follow the system
+  if(state.UiVersion<3){state.Preferences.SearchEngine="Google";state.UiVersion=3;}
+  if(state.UiVersion<4){state.Preferences.OfferPasswordSave=state.Preferences.OfferPasswordUpdate=true;state.UiVersion=4;} // offering to save logins is on by default, like other browsers
+  if(state.UiVersion<5){MigrateAgentIds(state.Preferences);state.UiVersion=5;}
+  if(state.UiVersion<6){state.Welcome=true;DropUntouchedDefaults(state.Preferences);state.UiVersion=6;} // 1.9: everyone makes their own companion, once
+  MoveOldCrew(state.Preferences);
+  foreach(var c in state.Preferences.Companions)Equip(c); // hired before the roles came with skills and knowledge files
+  foreach(var c in state.Preferences.Companions)c.Look=Unmarked(c.Look); // Stage 17 took the markings out
+  if(!state.Preferences.NamesChecked)FlagOldNames(state.Preferences); // Carbon's old stock names: ask once whether to keep one
+  Width = Math.Clamp(Prefs.Width, MinWidth, Math.Max(MinWidth, SystemParameters.WorkArea.Width - 60));
+  Height = Math.Clamp(Prefs.Height, MinHeight, Math.Max(MinHeight, SystemParameters.WorkArea.Height - 60));
+  if (App.IsQa) Prefs.DownloadFolder = Path.Combine(App.DataRoot, "Downloads");
+  if (!secondary) tabs.AddRange(RestoredWindows().FirstOrDefault() ?? Enumerable.Empty<BrowserTab>());
+  saveTimer.Tick += (_, _) => { saveTimer.Stop(); App.Breadcrumb = "saving tabs"; Save(); App.Breadcrumb = "idle, last: saving tabs"; };
+  memoryTimer.Tick += async (_, _) => { App.Breadcrumb = "memory saver"; await ReduceBackgroundMemory(); App.Breadcrumb = "idle, last: memory saver"; };
+  memoryTimer.Start();
+  toastTimer.Tick += (_, _) => { toastTimer.Stop(); ToastBar.Visibility = Visibility.Collapsed; };
+  WindowState = App.IsQa ? WindowState.Normal : WindowState.Maximized; // open maximized by default (above the taskbar)
+  // Test windows open where the test runner says (its own screen), never over the user's work.
+  if (App.IsQa && Environment.GetEnvironmentVariable("CARBON_QA_POS")?.Split(',') is [var qx, var qy]) { WindowStartupLocation = WindowStartupLocation.Manual; Left = double.Parse(qx); Top = double.Parse(qy); }
+  SourceInitialized += (_, _) => { var h = new WindowInteropHelper(this).Handle; InitializeFullScreen(); WatchDefaultOutput(); WatchRoutines(); WatchSummaries(); CompanionMemory.NameOf = NameOf; int round = 2; DwmSetWindowAttribute(h, 33, ref round, 4); ApplyTheme(); };
+  Loaded += async (_, _) => {
+   StartupMetrics.Mark("window-loaded");
+   if (!secondary) RestoreOtherWindows();
+   Task firstPage;
+   try {
+    // InitializeShell attaches the native page host before its first await. Start both controllers
+    // together instead of making the first website wait for the interface controller to initialize.
+    var shell = InitializeShell();
+    ApplyTheme();
+    if (LaunchUrl is { Length: > 0 } link) firstPage = NewTab(link, false, false);
+    else { if (tabs.Count == 0) tabs.Add(new BrowserTab()); firstPage = SelectTab(tabs.FirstOrDefault(t => t.Id == state.ActiveId && t.InChat == null) ?? tabs.FirstOrDefault(t => t.InChat == null) ?? tabs.First()); }
+    await Task.WhenAll(shell, firstPage);
+   }
+   catch(Exception ex) { if(closing)return;App.Log(ex);MessageBox.Show(this,"Carbon couldn't start its interface.\n\n"+(ex is WebView2RuntimeNotFoundException ? "Install Microsoft's WebView2 Evergreen Runtime, then reopen Carbon." : ex.Message),"Carbon");Close();return; }
+   if(closing)return;
+   ApplyTheme(); ApplyLayout();
+   browserReady = true;
+   StartupMetrics.Mark("controllers-ready");
+   await DrainExternalLinks();
+   if (!secondary) StartUpdateChecks();
+   if (!secondary && HasPluginKey) _ = RefreshPlugins();
+   if (!secondary && store.Recovered) Toast("Recovered your saved session. A backup is kept in your profile.");
+#if CARBON_QA
+   if (App.IsQa && !secondary) StartQa();
+#endif
+  };
+  Closing += (_, _) => {
+   closing = true; saveTimer.Stop(); memoryTimer.Stop(); Hide(); // disappear at once; tearing down the pages can take a moment
+   if (incognito) EndIncognito();
+   if(IsFullScreen){Prefs.Width=fullScreenRestoreBounds.Width;Prefs.Height=fullScreenRestoreBounds.Height;}
+   else if (!secondary && WindowState == WindowState.Normal) { Prefs.Width = ActualWidth; Prefs.Height = ActualHeight; }
+   Save(); if (!Unsaved) closedWindows.Add((DateTime.UtcNow, tabs.ToArray()));
+   foreach (var tab in tabs) { tab.Closed = true; tab.View?.Dispose(); }
+   managementView?.Dispose();shellView?.Dispose();snapshotCapture=null;snapshotCore=null;loginOffer=null;importBatch=null;ClearOwnedPasswordClipboard();
+  };
+  SizeChanged += (_, _) => { Sheet.Width = Math.Max(320, Math.Min(550, ContentArea.ActualWidth - 40)); Sheet.MaxHeight = Math.Max(250, PageArea.ActualHeight - 60); };
+  StateChanged+=(_,_)=>{ApplyResizeEdge();RestorePageWindow();ApplyMemoryPolicy();ShellPublish();};
+  SystemEvents.UserPreferenceChanged += SystemPreferenceChanged;
+  Closed += (_, _) => {
+   SystemEvents.UserPreferenceChanged -= SystemPreferenceChanged;
+   Windows.Remove(this); if (LastActive == this) LastActive = Windows.LastOrDefault();
+   // Keep the app alive in the remaining windows and save without this window's tabs.
+   if (Windows.Count > 0) { if (Application.Current.MainWindow == this) Application.Current.MainWindow = Windows[0]; Windows[0].Save(); }
+   if (!temporary && Windows.All(w => w.temporary)) foreach (var w in Windows.ToList()) w.Close(); // a sign-in window doesn't outlive the browser
+  };
+ }
+ public string? LaunchUrl { get; init; }
+ readonly Queue<string> externalLinks = new();
+ bool browserReady, drainingLinks;
+ DateTime lastDownloadPublish;
+ // A link opened from another app while Carbon is running.
+ public async void OpenFromOutside(string url)
+ {
+  if (closing) return;
+  if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+  Activate(); Topmost = !Topmost; Topmost = !Topmost;
+  if (url.Length == 0 || OpenOverSetup(url)) return;
+  externalLinks.Enqueue(url);
+  try { await DrainExternalLinks(); } catch (Exception ex) { App.Log(ex); Toast("Couldn't open that link."); }
+ }
+ /// A link from another app, or a sign-in page: while setup covers this window, it opens in a window of its own, in front.
+ internal bool OpenOverSetup(string url)
+ {
+  if (!state.Welcome || secondary || incognito) return false;
+  var page = new MainWindow(new BrowserTab { Url = url }, null) { temporary = true }; page.Show(); page.Activate();
+  return true;
+ }
+ async Task DrainExternalLinks()
+ {
+  if (!browserReady || drainingLinks || closing) return;
+  drainingLinks = true;
+  try { while (!closing && externalLinks.TryDequeue(out var url)) await NewTab(url, false, false); }
+  finally { drainingLinks = false; }
+ }
+ void SystemPreferenceChanged(object sender, UserPreferenceChangedEventArgs e) { if (Prefs.Theme == "System") Dispatcher.BeginInvoke(ApplyTheme); }
+ // Test windows get their "system" theme from the test (CARBON_QA_SYSTEM_THEME, or the systemTheme op), dark unless it says.
+ internal static string? qaSystemTheme = App.IsQa ? Environment.GetEnvironmentVariable("CARBON_QA_SYSTEM_THEME") ?? "Dark" : null;
+ static bool SystemDark => qaSystemTheme != null ? qaSystemTheme == "Dark" : (int?)Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1) == 0;
+ void SaveLater() { if (!closing) { if (!saveTimer.IsEnabled) saveTimer.Start(); ShellPublish(); } } // the first change starts it and later ones don't push it back, so pages that keep changing can't hold off the save
+ internal void Save()
+ {
+  state.Tabs = SavedTabs().ToList();
+  state.Groups.RemoveAll(g => !Windows.Any(w => w.tabs.Any(t => t.Group == g.Id)) && !state.Tabs.Any(t => t.Group == g.Id));
+  var main = Windows.FirstOrDefault(w => !w.closing && !w.Unsaved) ?? this;
+  if (!main.Unsaved) state.ActiveId = main.active?.Private == false ? main.active.Id : state.Tabs.FirstOrDefault()?.Id;
+  store.Save(state);
+ }
+ void Toast(string message) { if(shellReady){ShellSend(new{kind="toast",message});return;} ToastText.Text = message; ToastBar.Visibility = Visibility.Visible; toastTimer.Stop(); toastTimer.Start(); }
+ SolidColorBrush Brush(string name) => (SolidColorBrush)FindResource(name);
+ static readonly System.Drawing.Color DarkPage = System.Drawing.Color.FromArgb(0x1C, 0x1C, 0x1E);
+ // The WPF control hands a non-white DefaultBackgroundColor to a new view through this process-wide variable and never
+ // clears it, so a white view (a light-theme page, a popup) created later would come up in the last dark view's color.
+ internal static void ClearViewColor() => Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", null);
+ void ApplyTheme()
+ {
+  dark = Prefs.Theme == "Dark" || (Prefs.Theme == "System" && SystemDark);
+  var colors = dark
+   ? new[] { "#151517", "#1C1C1E", "#151517", "#F2F2F3", "#A1A1A8", "#333336", "#2C2C2F", "#242426" }
+   : new[] { "#F6F4F0", "#FFFFFF", "#F6F4F0", "#262421", "#837D74", "#EBE7E0", "#F2EFEA", "#EFEBE5" };
+  string[] keys = ["Ground", "Surface", "Sidebar", "Ink", "Muted", "Line", "Wash", "Hover"];
+  for (int i = 0; i < keys.Length; i++) Application.Current.Resources[keys[i]] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(colors[i]));
+  int theme = dark ? 1 : 0;
+  DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref theme, 4);
+  foreach (var tab in tabs) if (tab.View?.CoreWebView2 is { } core) core.Profile.PreferredColorScheme = dark ? CoreWebView2PreferredColorScheme.Dark : CoreWebView2PreferredColorScheme.Light;
+  RenderTabs(); UpdateChrome(); SaveLater();
+ }
+ void ApplyLayout()
+ {
+  StripRow.Height = new GridLength(focusMode ? 0 : 42);
+  RenderTabs(); SaveLater();
+ }
+ void RenderTabs()
+ {
+  if(shellView!=null){ShellPublish();return;}
+  TopTabs.Children.Clear();
+  foreach (var tab in tabs.OrderByDescending(t => t.Pinned)) TopTabs.Children.Add(TabButton(tab, tab.Pinned, true));
+  var add = new Button { Content = "+", FontSize = 20, Width = 34, Padding = new Thickness(0), ToolTip = "New tab · Ctrl + T" };
+  add.Click += async (_, _) => await NewTab();
+  TopTabs.Children.Add(add);
+ }
+ Button TabButton(BrowserTab tab, bool pin, bool horizontal)
+ {
+  var b = new Button { Margin = new Thickness(0, 0, 4, 4), Height = pin && !horizontal ? 42 : 34, Padding = new Thickness(pin ? 0 : 9, 0, pin ? 0 : 5, 0), HorizontalContentAlignment = HorizontalAlignment.Stretch, ToolTip = tab.Title + (tab.Url.Length > 0 ? "\n" + tab.Url : ""), AllowDrop = true };
+  b.SetResourceReference(BackgroundProperty, tab == active ? "Wash" : pin ? "Hover" : "Sidebar");
+  if (pin) { b.Width = horizontal ? 38 : 42; b.Content = new TextBlock { Text = Initial(tab), FontWeight = FontWeights.SemiBold, FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }; }
+  else {
+   if (horizontal) b.Width = 185;
+   var g = new Grid(); g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) }); g.ColumnDefinitions.Add(new ColumnDefinition()); g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(23) });
+   var letter = new TextBlock { Text = tab.Private ? "\uE72E" : Initial(tab), FontSize = 11, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, Foreground = Brush("Muted") };
+   if (tab.Private) letter.FontFamily = new FontFamily("Segoe MDL2 Assets");
+   var label = new TextBlock { Text = tab.Title, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Foreground = tab == active ? Brush("Ink") : Brush("Muted") };
+   Grid.SetColumn(label, 1);
+   var close = new Button { Content = "×", FontSize = 16, Padding = new Thickness(0), Width = 21, Height = 24, Opacity = tab == active ? 0.7 : 0, ToolTip = "Close tab" };
+   System.Windows.Automation.AutomationProperties.SetName(close, "Close " + tab.Title);
+   Grid.SetColumn(close, 2); close.Click += async (_, e) => { e.Handled = true; await CloseTab(tab); };
+   b.MouseEnter += (_, _) => close.Opacity = 0.85; b.MouseLeave += (_, _) => close.Opacity = tab == active ? 0.7 : 0;
+   g.Children.Add(letter); g.Children.Add(label); g.Children.Add(close); b.Content = g;
+  }
+  System.Windows.Automation.AutomationProperties.SetName(b, (pin ? "Pinned " : "Tab ") + tab.Title);
+  b.Click += async (_, _) => await SelectTab(tab);
+  b.PreviewMouseDown += async (_, e) => { if (e.ChangedButton == MouseButton.Middle) { e.Handled = true; await CloseTab(tab); } };
+  b.ContextMenu = TabMenu(tab);
+  Point start = new();
+  b.PreviewMouseLeftButtonDown += (_, e) => start = e.GetPosition(b);
+  b.MouseMove += (_, e) => { if (e.LeftButton == MouseButtonState.Pressed && (e.GetPosition(b) - start).Length > 10) DragDrop.DoDragDrop(b, new DataObject("CarbonTab", tab.Id), DragDropEffects.Move); };
+  b.Drop += (_, e) => { if (e.Data.GetData("CarbonTab") is string id && tabs.FirstOrDefault(t => t.Id == id) is { } moved && moved != tab) { tabs.Remove(moved); tabs.Insert(tabs.IndexOf(tab), moved); RenderTabs(); SaveLater(); } };
+  return b;
+ }
+ static string Initial(BrowserTab tab) { var title = tab.Title.Trim(); return title.Length == 0 || title == "New tab" ? "·" : System.Globalization.StringInfo.GetNextTextElement(title).ToUpperInvariant(); }
+ ContextMenu TabMenu(BrowserTab tab)
+ {
+  var menu = new ContextMenu();
+  AddMenu(menu, tab.Pinned ? "Unpin tab" : "Pin tab", () => { tab.Pinned = !tab.Pinned; RenderTabs(); SaveLater(); });
+  AddMenu(menu, "Duplicate", async () => await NewTab(tab.Url, tab.Private, false));
+  AddMenu(menu, tab.View?.CoreWebView2?.IsMuted == true ? "Unmute" : "Mute", () => { if (tab.View?.CoreWebView2 is { } c) c.IsMuted = !c.IsMuted; });
+  AddMenu(menu, "Put tab to sleep", async () => { DisposeView(tab); if (tab == active) await NewTab("", false, false); RenderTabs(); Toast("Tab is asleep. Select it to load it again."); });
+  menu.Items.Add(new Separator());
+  AddMenu(menu, "Close tab", async () => await CloseTab(tab, true));
+  AddMenu(menu, "Close other unpinned tabs", async () => { foreach (var other in tabs.Where(t => t != tab && !t.Pinned).ToList()) await CloseTab(other, true); });
+  return menu;
+ }
+ async Task<BrowserTab> NewTab(string url = "", bool isPrivate = false, bool prompt = true, string? engine = null)
+ {
+  isPrivate |= incognito; // every tab in an incognito window is private
+  var tab = new BrowserTab { Url = url, Private = isPrivate, Title = isPrivate ? "Private tab" : "New tab", Engine = isPrivate ? null : engine }; // a link from a companion's page stays in its profile
+  tabs.Add(tab); await SelectTab(tab);
+  if (prompt && url.Length == 0) ShowAddress("");
+  SaveLater(); return tab;
+ }
+ /// The tab whose page is on screen: the active tab, or for a chat tab whose page is open, the page its AI works in (beside the chat).
+ BrowserTab? Shown => active?.ChatId is { } chat ? active.PageOpen ? tabs.Where(t => (t.InChat ?? t.RunChat) == chat && !t.Closed).MaxBy(t => t.LastActive) : null : active;
+ /// Puts the shown page on screen and hides the rest.
+ void ShowPage()
+ {
+  var shown = Shown; var partner = Partner;
+  foreach (var t in tabs) if (t.View != null) t.View.Visibility = (t == shown || t == partner) && panel == "" ? Visibility.Visible : Visibility.Hidden;
+  RestorePageWindow();
+ }
+ /// The tab that shows this chat, opened next to the others if it isn't.
+ BrowserTab ChatTab(string chatId)
+ {
+  if (tabs.FirstOrDefault(t => t.ChatId == chatId) is { } open) return open;
+  var tab = new BrowserTab { ChatId = chatId, Title = MyChats.FirstOrDefault(c => c.Id == chatId)?.Title is { Length: > 0 } title ? title : "Chat" };
+  tabs.Add(tab); SaveLater(); return tab;
+ }
+ /// A Carbon app tab: it shows a chat or one of the home's pages, and going from one to another changes it in place.
+ /// In an incognito window it's that window's private tab, and it only ever shows the window's own chats.
+ bool IsAppTab(BrowserTab t) => t.InChat == null && (t.ChatId != null || t.Url.Length == 0 && (!t.Private || incognito));
+ static string Spot(BrowserTab t) => t.ChatId is { } chat ? "chat:" + chat : "home:" + t.Home;
+ /// A place Back or Forward can still go: a home page, or a chat that's still here and not open in another tab.
+ bool CanGo(string spot) => !spot.StartsWith("chat:") || MyChats.Any(c => c.Id == spot[5..]) && !tabs.Any(t => t.ChatId == spot[5..]);
+ /// The app tab in view with nothing else on screen: Back and Forward move through its own places.
+ BrowserTab? AppNav => active is { } a && IsAppTab(a) && Shown?.View == null ? a : null;
+ /// Where a chat or home page opens: the app tab in view, else the one used last, else a new one.
+ async Task<BrowserTab> AppTab() => active is { } a && IsAppTab(a) ? a : tabs.Where(IsAppTab).MaxBy(t => t.LastActive) ?? await NewTab("", false, false);
+ /// Shows a chat ("chat:<id>") or home page ("home:<page>") in an app tab, in place; Back comes back here.
+ async Task Go(BrowserTab tab, string spot, bool remember = true)
+ {
+  if (spot != Spot(tab)) {
+   if (remember) { tab.Back.Add(Spot(tab)); tab.Forward.Clear(); }
+   if (spot.StartsWith("chat:")) { tab.ChatId = spot[5..]; tab.Home = ""; tab.Title = MyChats.FirstOrDefault(c => c.Id == tab.ChatId)?.Title is { Length: > 0 } title ? title : "Chat"; }
+   else { tab.ChatId = null; tab.Home = spot[5..]; tab.Title = tab.Private ? "Private tab" : "New tab"; }
+   tab.PageOpen = false;
+  }
+  await SelectTab(tab); SaveLater();
+ }
+ /// Opens a chat: where it's already open (in any window like this one), else in a new tab when asked, else in place.
+ async Task OpenChat(string id, bool newTab = false)
+ {
+  if (tabs.FirstOrDefault(t => t.ChatId == id) is { } open) { await SelectTab(open); return; }
+  if (!incognito && Windows.FirstOrDefault(w => w != this && !w.incognito && w.tabs.Any(t => t.ChatId == id)) is { } other) { other.Activate(); await other.SelectTab(other.tabs.First(t => t.ChatId == id)); return; }
+  if (newTab) await SelectTab(ChatTab(id)); else await Go(await AppTab(), "chat:" + id);
+ }
+ /// Back (-1) or Forward (1) in the app tab, past chats that were deleted or opened in another tab since.
+ async Task AppStep(int step)
+ {
+  if (AppNav is not { } tab) return;
+  var (from, to) = step < 0 ? (tab.Back, tab.Forward) : (tab.Forward, tab.Back);
+  while (from.Count > 0) {
+   var spot = from[^1]; from.RemoveAt(from.Count - 1);
+   if (CanGo(spot)) { to.Add(Spot(tab)); await Go(tab, spot, false); return; }
+  }
+  ShellPublish();
+ }
+ async Task SelectTab(BrowserTab tab)
+ {
+  if (tab.InChat is { } app && app.StartsWith(AppPages)) tab.InChat = null; // an AI app's background tab joins the user's tabs once they open it
+  if (tab.InChat is { } owner && !tab.Closed) { tab.LastActive = DateTime.UtcNow; tab = ChatTab(owner); tab.PageOpen = true; } // an AI's page opens in its chat
+  if (tab.Closed || !tabs.Contains(tab)) return;
+  if(active!=tab&&contentFullScreen)await ExitContentFullScreen();
+  CloseSheet(false); CancelUpload();
+  var pair = tab == splitLeft ? splitRight : tab == splitRight ? splitLeft : null; // switching within a split keeps the other half up
+  foreach (var t in tabs) if (t.View != null && t != pair) t.View.Visibility = Visibility.Hidden;
+  var leaving=active; if(leaving!=null)leaving.LastActive=DateTime.UtcNow;
+  active = tab;tab.LastActive=DateTime.UtcNow;
+  if(tab.View!=null)tab.RestoreScroll=0; // still loaded: it shows exactly as it was left
+  if(tab.View?.CoreWebView2 is {IsSuspended:true} sleeping)sleeping.Resume(); // instant: page state was kept
+  ApplyMemoryPolicy();
+  StartPage.Visibility = tab.Url.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+  PrivateNote.Visibility = tab.Private ? Visibility.Visible : Visibility.Collapsed;
+  Greeting.Text = tab.Private ? "A little privacy." : "Where to?";
+  RenderTabs(); UpdateChrome(); SaveLater();
+  if (tab.ChatId is { } chat) { aiChat = MyChats.FirstOrDefault(c => c.Id == chat); aiError = ""; }
+  // A chat at work in this tab claims its side panel, only while the panel has no chat of its own.
+  var working = tab.ChatId == null && aiChat == null ? WorkingIn(tab) : null;
+  if (working != null) { aiChat = working; aiError = ""; }
+  if (leaving?.Side != tab.Side) aiError = "";
+  if (tab.ChatId != null || leaving?.ChatId != null || working != null || leaving?.Side != tab.Side) PublishAi();
+  if (Shown is { Url.Length: > 0 } page) await EnsureView(page);
+  if (active == tab && Shown is { View: { } view } shown && panel == "") { view.Visibility = Visibility.Visible;LayoutSplit();RestorePageWindow(); if (shown == tab) view.Focus(); }
+  if (active == tab && Partner is { } partner) { await EnsureView(partner); LayoutSplit(); RestorePageWindow(); }
+ }
+ async Task CloseTab(BrowserTab tab, bool removePin = false)
+ {
+  if (tab.Pinned && !removePin) {
+   if (tab == splitLeft || tab == splitRight) { splitLeft = splitRight = null; LayoutSplit(); } // asleep, it leaves its split: it doesn't wake as the other half
+   DisposeView(tab);
+   if (tab == active) { var next = tabs.FirstOrDefault(t => t != tab && !t.Pinned && t.InChat == null); if (next != null) await SelectNext(next); else await NewTab("", false, false); }
+   Toast("Pinned tab put to sleep."); RenderTabs(); SaveLater(); return;
+  }
+  if (!tabs.Contains(tab)) return;
+  var index = tabs.Where(t => t.InChat == null).ToList().IndexOf(tab); // its place in the strip: the next tab is its neighbor there
+  if (!tab.Private && tab.InChat == null) { closedTabs.Push(new BrowserTab { Url = tab.Url, Title = tab.Title, Pinned = tab.Pinned }); while (closedTabs.Count > 25) { var keep = closedTabs.Take(25).Reverse().ToArray(); closedTabs.Clear(); foreach (var t in keep) closedTabs.Push(t); } }
+  if (tab == splitLeft || tab == splitRight) { splitLeft = splitRight = null; LayoutSplit(); }
+  tab.Closed = true; DisposeView(tab); tabs.Remove(tab);
+  if (tab.ChatId is { } chat) foreach (var page in tabs.Where(t => t.InChat == chat).ToList()) { page.Closed = true; DisposeView(page); tabs.Remove(page); } // its pages go with it
+  var rest = tabs.Where(t => t.InChat == null).ToList();
+  if (rest.Count == 0) await NewTab("", false, false);
+  else if (active == tab) await SelectNext(rest[Math.Clamp(index, 0, rest.Count - 1)]);
+  else { if (Shown is { Url.Length: > 0 } page) await EnsureView(page); ShowPage(); LayoutSplit(); } // it may have been the page beside the chat in view: the next one shows
+  RenderTabs(); SaveLater();
+ }
+ /// The tab a close or a move leaves you on. A chat shows on its own: its companion's page opens beside it only when you open it.
+ Task SelectNext(BrowserTab next) { next.PageOpen = false; return SelectTab(next); }
+ // The WPF WebView2 control closes the whole app window when a page calls window.close() (e.g. a Google
+ // sign-in pop-up finishing). Carbon closes just that tab instead (WindowCloseRequested below), so remove the control's handler.
+ static void DetachWindowClose(WebView2 view, CoreWebView2 core)
+ {
+  const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+  // The handler lives on the control or on its internal WebView2Base helper, depending on the SDK version.
+  foreach (object? owner in new object?[] { view }.Concat(typeof(WebView2).GetFields(Any).Select(f => f.GetValue(view)))) {
+   if (owner == null) continue;
+   for (var type = owner.GetType(); type != null; type = type.BaseType) {
+    var method = type.GetMethod("CoreWebView2_WindowCloseRequested", Any | System.Reflection.BindingFlags.DeclaredOnly);
+    if (method == null) continue;
+    core.WindowCloseRequested -= (EventHandler<object>)Delegate.CreateDelegate(typeof(EventHandler<object>), owner, method);
+    return;
+   }
+  }
+  App.Log(new MissingMethodException("WebView2 window-close handler not found; a page calling window.close() may close Carbon."));
+ }
+ void DisposeView(BrowserTab tab)
+ {
+  DropPermissions(tab);
+  if(tab==Shown&&contentFullScreen){contentFullScreen=false;ApplyFullScreen();}
+  // A closed tab that is still downloading keeps its (hidden) engine until the downloads finish;
+  // disposing it now would cancel them. The download's StateChanged handler finishes the job.
+  if (tab.Closed && tab.ActiveDownloads > 0 && tab.View is { } busy) { busy.Visibility = Visibility.Hidden; return; }
+  if (tab.View is { } view) { WebHost.Children.Remove(view); view.Dispose(); tab.View = null; }
+  if (tab.Dialog is { } open) { tab.Dialog = null; try { open.Deferral.Complete(); } catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException) { } }
+  tab.LoadingTask = null; tab.Loading = false; tab.Reader = false; tab.HideScriptId = null;tab.LoginScriptId=null;tab.LoginDetected=false;tab.LoginFilled=false;
+ }
+ /// A download a page starts goes to your download folder and the downloads card. done: once it ends, however it ends.
+ void Download(BrowserTab tab, CoreWebView2DownloadStartingEventArgs e, Action? done = null)
+ {
+  tab.DownloadStartedAt = DateTime.UtcNow;
+  var operation = e.DownloadOperation;
+  Directory.CreateDirectory(Prefs.DownloadFolder);
+  string name = Path.GetFileName(e.ResultFilePath);
+  if (string.IsNullOrEmpty(name)) name = "download";
+  string path = Path.Combine(Prefs.DownloadFolder, name);
+  for (int i = 1; File.Exists(path); i++) path = Path.Combine(Prefs.DownloadFolder, Path.GetFileNameWithoutExtension(name) + $" ({i})" + Path.GetExtension(name));
+  e.ResultFilePath = path;
+  downloads.Insert(0, new DownloadItem { Path = path, Operation = operation, Private = tab.Private });
+  tab.ActiveDownloads++;
+  operation.StateChanged += (_, _) => {
+   if (operation.State != CoreWebView2DownloadState.InProgress && --tab.ActiveDownloads <= 0 && tab.Closed) { tab.ActiveDownloads = 0; DisposeView(tab); }
+   if (operation.State != CoreWebView2DownloadState.InProgress) done?.Invoke();
+   if (operation.State == CoreWebView2DownloadState.Completed) Toast("Downloaded " + Path.GetFileName(path));
+   if (operation.State == CoreWebView2DownloadState.Interrupted) Toast("Download interrupted: " + operation.InterruptReason);
+   ShellPublish();
+  };
+  // Keep the toolbar progress ring moving, at most ~4 updates a second.
+  operation.BytesReceivedChanged += (_, _) => { if((DateTime.UtcNow-lastDownloadPublish).TotalMilliseconds>250){lastDownloadPublish=DateTime.UtcNow;ShellPublish();} };
+  e.Handled=true;
+  // Show the downloads card as soon as a download starts, like Chrome/Opera.
+  if (shellReady) Dispatcher.BeginInvoke(() => ShellOpen("downloads")); else Toast("Downloading " + name);
+  ShellPublish();
+ }
+ async Task EnsureView(BrowserTab tab)
+ {
+  if (tab.View?.CoreWebView2 != null) return;
+  if (tab.LoadingTask != null) { await tab.LoadingTask; return; }
+  tab.LoadingTask = CreateView(tab);
+  await tab.LoadingTask;
+ }
+ async Task CreateView(BrowserTab tab)
+ {
+  ClearViewColor();
+  var view = new WebView2 {
+   CreationProperties = new CoreWebView2CreationProperties { UserDataFolder = Path.Combine(App.DataRoot, "WebView"), ProfileName = EngineOf(tab), IsInPrivateModeEnabled = tab.Private },
+   DefaultBackgroundColor = dark ? DarkPage : System.Drawing.Color.White,
+   Visibility = Shown == tab && panel == "" ? Visibility.Visible : Visibility.Hidden
+  };
+  tab.View = view; WebHost.Children.Add(view); tab.Loading = true; UpdateChrome();
+  view.Loaded+=(_,_)=>RestorePageWindow();
+  WebHost.UpdateLayout();
+  try {
+   var environment=await App.BrowserEnvironment;var options=environment.CreateCoreWebView2ControllerOptions();options.ProfileName=EngineOf(tab);options.IsInPrivateModeEnabled=tab.Private;
+   await view.EnsureCoreWebView2Async(environment,options); ClearViewColor();
+   StartupMetrics.Mark("page-controller");
+   if (tab.Closed || tab.View != view || closing) return;
+   view.UpdateWindowPos();RestorePageWindow();
+   var core = view.CoreWebView2;
+   ApplyMemoryPolicy(); // includes views initialized after a quick tab switch
+   DetachWindowClose(view, core);
+   core.Settings.IsStatusBarEnabled = true; // link preview on hover, like Edge
+   core.Settings.IsZoomControlEnabled = true;
+   core.Settings.AreBrowserAcceleratorKeysEnabled = true;
+   // Alerts, confirms and prompts show inside Carbon (and AI agents can answer them) instead of a Windows dialog.
+   core.Settings.AreDefaultScriptDialogsEnabled = false;
+   ApplyProtection(core);
+   // Setup's first task works on a made-up comparison page that ships with Carbon: an https address agents may open.
+   core.SetVirtualHostNameToFolderMapping(SampleHost, Path.Combine(await AppContent.ShellFolder, "sample"), CoreWebView2HostResourceAccessKind.DenyCors);
+   core.Profile.PreferredColorScheme = dark ? CoreWebView2PreferredColorScheme.Dark : CoreWebView2PreferredColorScheme.Light;
+   if (Directory.Exists(Prefs.DownloadFolder)) core.Profile.DefaultDownloadFolderPath = Prefs.DownloadFolder;
+   // Black while a page loads (no white flash in the dark theme), then the normal canvas: white unless the page asks for dark, as in Edge.
+   core.DOMContentLoaded += (_, _) => view.DefaultBackgroundColor = System.Drawing.Color.White;
+   core.IsDocumentPlayingAudioChanged += (_, _) => { if (core.IsDocumentPlayingAudio) { tab.Media = true; core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal; } };
+   SetupBlocking(tab, core);
+   await InstallHiddenRules(tab);
+   await ApplyUsbRule(tab);
+   await InstallLoginObserver(tab);
+   await SetupFilePaste(tab, core);
+   await InstallAudioReroute(core);
+   await core.AddScriptToExecuteOnDocumentCreatedAsync(MemoryActivityScript);
+   await core.AddScriptToExecuteOnDocumentCreatedAsync(StoreButtonScript);
+   if (!tab.Private && Prefs.SaveDrafts) await core.AddScriptToExecuteOnDocumentCreatedAsync(DraftScript);
+   WireView(tab, view, core);
+   core.Navigate(tab.Url);
+   StartupMetrics.Mark("page-navigation");
+  } catch (Exception ex) {
+   if (closing || tab.Closed || tab.View != view) return;
+   App.Log(ex); DisposeView(tab);
+   if (tab == active) ShowError("The browser engine couldn't start.", ex is WebView2RuntimeNotFoundException ? "Install Microsoft's WebView2 Evergreen Runtime, then reopen Carbon." : ex.Message);
+  } finally { if (tab.View == view) tab.LoadingTask = null; }
+ }
+ // Page events go to the window that holds the tab. Moving a tab to another window wires them again
+ // there, and the old window's handlers stand down: the page itself keeps running, with no reload.
+ void WireView(BrowserTab tab, WebView2 view, CoreWebView2 core)
+ {
+  var wire = tab.Wire = new object();
+  bool Off() => tab.Wire != wire;
+  core.ScriptDialogOpening += (_, e) => { if (Off()) return; OpenPageDialog(tab, e); };
+  core.FaviconChanged+=async(_,_)=>{ if (Off()) return; await UpdateFavicon(tab,core); };
+  core.LaunchingExternalUriScheme+=(_,e)=>{if (Off()) return; e.Cancel=true;var uri=e.Uri;var from=e.InitiatingOrigin;var clicked=e.IsUserInitiated;Dispatcher.BeginInvoke(()=>OpenAppLink(tab,uri,from,clicked));};
+  core.ServerCertificateErrorDetected+=(_,e)=>{if (Off()) return; e.Action=CoreWebView2ServerCertificateErrorAction.Cancel;tab.CertificateError=true;tab.Secure=false;ShellPublish();};
+  core.NavigationStarting += (_, e) => { if (Off()) return; 
+   view.DefaultBackgroundColor = dark ? DarkPage : System.Drawing.Color.White;
+   App.Breadcrumb="page navigating "+Host(e.Uri);
+   tab.NavigationId=e.NavigationId;
+   tab.LoginFilled=false;tab.LoginDetected=false;
+   if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) { e.Cancel = true; return; }
+   if (uri.Scheme is not ("http" or "https" or "about" or "data" or "blob" or "file" or "chrome-extension" or "view-source" or "edge")) {
+    e.Cancel = true;
+    { var link = e.Uri; var clicked = e.IsUserInitiated; Dispatcher.BeginInvoke(() => OpenAppLink(tab, link, "", clicked)); }
+    return;
+   }
+   if(Uri.TryCreate(tab.Url,UriKind.Absolute,out var previous)&&previous.Host!=uri.Host)tab.Favicon="";
+   tab.Loading = true; tab.Reader = false; tab.HideToken = null; tab.Blocked = 0;tab.Secure=false;tab.CertificateError=false;
+   if (uri.Scheme is "http" or "https" or "file" or "view-source" or "edge") { tab.PendingUrl = e.Uri; tab.ShowingError = false; } // the address stays with the page on screen until the new one arrives
+   if (tab == Shown) UpdateChrome();
+  };
+  core.SourceChanged += (_, _) => { if (Off()) return;  if (!tab.Reader && !tab.ShowingError && (core.Source != "about:blank" || tab.HadPage)) { tab.Url = core.Source; tab.HadPage = true; } ApplySound(tab); if (tab == Shown) UpdateChrome(); SaveLater(); };
+  core.ContentLoading += (_, _) => { if (Off() || tab.InUse == "") return; tab.InUse = ""; ShellPublish(); }; // a new document has nothing on yet
+  core.ScreenCaptureStarting += (_, e) => { if (!Off() && SiteRule(tab, "ScreenShare") == "Deny") e.Cancel = true; };
+  core.DocumentTitleChanged += (_, _) => { if (Off()) return; 
+   if (!tab.Reader) tab.Title = string.IsNullOrWhiteSpace(core.DocumentTitle) ? Host(tab.Url) : core.DocumentTitle;
+   RenderTabs(); if (tab == Shown) UpdateChrome(); SaveLater();
+  };
+  core.HistoryChanged += (_, _) => { if (Off()) return;  if (tab == Shown) UpdateChrome(); };
+  core.NavigationCompleted += async (_, e) => { if (Off()) return; 
+   App.Breadcrumb="page loaded "+Host(tab.Url);
+   bool ok=e.IsSuccess;var status=e.WebErrorStatus;var navId=e.NavigationId;
+   // A link that turns into a download ends its navigation as "aborted", sometimes just before the
+   // download is announced. Give it a moment so a download is never shown as "connection lost".
+   if(!ok&&status==CoreWebView2WebErrorStatus.ConnectionAborted&&navId==tab.NavigationId)await Task.Delay(800);
+   // A replaced navigation can finish with ConnectionAborted after a new page starts.
+   if(navId!=tab.NavigationId)return;
+   // Cancelling a certificate error can leave the previous document displayed.
+   // Keep the address tied to that document, not to the failed destination.
+   var failedUrl=tab.PendingUrl??tab.Url;tab.PendingUrl=null;
+   bool becameDownload=!ok&&DateTime.UtcNow-tab.DownloadStartedAt<TimeSpan.FromSeconds(10);
+   // Any HTTP answer (404/401/500 JSON from an API, etc.) is the site's real response and stays on screen;
+   // WebView2 still reports those as "not successful". Only failures with no response at all get an error page.
+   if(!ok&&!becameDownload&&e.HttpStatusCode>0)ok=true;
+   bool showError=!ok&&!becameDownload&&status!=CoreWebView2WebErrorStatus.OperationCanceled;
+   if(becameDownload){
+    tab.Loading=false;
+    // Pages whose only job was to hand over a file (a new tab/pop-up with nothing loaded) close, like Chrome.
+    if(string.IsNullOrEmpty(core.Source)||core.Source=="about:blank"){_=Dispatcher.BeginInvoke(async()=>{if(!tab.Closed)await CloseTab(tab,true);if(shellReady)ShellOpen("downloads");});return;}
+    tab.Url=core.Source;
+   }
+   if(!ok&&!showError&&!string.IsNullOrEmpty(core.Source)&&core.Source!="about:blank")tab.Url=core.Source;
+   tab.Secure=ok&&!tab.CertificateError&&Uri.TryCreate(tab.Url,UriKind.Absolute,out var secured)&&secured.Scheme=="https";
+   tab.Loading = false; if (tab == Shown) UpdateChrome();
+   if(ok&&tab.RestoreScroll>0){var y=tab.RestoreScroll;tab.RestoreScroll=0;_=core.RunAsync("window.scrollTo(0,"+y.ToString(System.Globalization.CultureInfo.InvariantCulture)+")");}
+   if (ok && !tab.ShowingError && !tab.Private && !tab.Reader && Uri.TryCreate(tab.Url, UriKind.Absolute, out var u) && u.Scheme is "https" or "http") {
+    state.History.RemoveAll(v => v.Url == tab.Url && (DateTime.Now - v.At).TotalMinutes < 5);
+    state.History.Insert(0, new Visit { Title = tab.Title, Url = tab.Url });
+    if (state.History.Count > 2000) state.History.RemoveRange(2000, state.History.Count - 2000);
+    SaveLater();
+   }
+   if(showError){
+    // Show a full-page error for this cause; keep the address on the page that failed.
+    tab.ShowingError=true;tab.Url=failedUrl;
+    core.NavigateToString(ErrorPages.Html(status,tab.CertificateError,failedUrl,dark,Prefs.SearchEngine));
+    if(tab==Shown)UpdateChrome();
+   }
+  };
+  core.NewWindowRequested += async (_, e) => { if (Off()) return; 
+   var deferral = e.GetDeferral(); e.Handled = true;
+   try {
+    if (!e.IsUserInitiated && SiteRule(tab, "Popups") != "Allow") { if (SiteRule(tab, "Popups") != "Deny") PopupBlocked(tab, e.Uri); return; }
+    bool agent = tab.Agent != null && DateTime.UtcNow - tab.AgentActedAt < TimeSpan.FromSeconds(10);
+    if (!agent && e.WindowFeatures.HasSize) { await OpenPageWindow(tab, e); return; }
+    // A link an AI just clicked opens as another background AI tab, and the AI moves into it.
+    var child = agent ? await OpenAgentTab(tab.AgentKey ?? tab.Agent!, "about:blank", tab.InChat != null) : await NewTab("about:blank", tab.Private, false, tab.Engine);
+    if (child.View?.CoreWebView2 is { } childCore) e.NewWindow = childCore;
+   } catch (Exception ex) { App.Log(ex); Toast("Couldn't open this pop-up."); }
+   finally { deferral.Complete(); }
+  };
+  core.DownloadStarting += (_, e) => { if (!Off()) Download(tab, e); };
+  core.PermissionRequested += async (_, e) => { if (Off()) return; 
+   using var deferral=e.GetDeferral();
+   // Ask inside Carbon (a bar above the page), never with a separate Windows dialog.
+   var site=Host(e.Uri);var allow=await AskPermission(tab,string.IsNullOrWhiteSpace(site)?"This page":site,e.PermissionKind);
+   e.State = allow ? CoreWebView2PermissionState.Allow : CoreWebView2PermissionState.Deny;
+   e.SavesInProfile = !tab.Private; // remember the choice per site, like Chrome (reset in Privacy & security)
+   // Dispose completes this deferral. Completing it explicitly as well causes
+   // WebView2's E_ILLEGAL_METHOD_CALL after the prompt closes.
+  };
+  core.ProcessFailed += (_, e) => { if (Off()) return; Dispatcher.BeginInvoke(() => {
+   if (tab.Closed || closing) return;
+   switch (e.ProcessFailedKind) {
+    // The page's own renderer died: show a crash screen in place. It is not reloaded until you choose to.
+    case CoreWebView2ProcessFailedKind.RenderProcessExited:
+     tab.ShowingError = true; tab.Loading = false;
+     try { core.NavigateToString(ErrorPages.Crashed(tab.Url, dark)); } catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException) { DisposeView(tab); }
+     if (tab == Shown) UpdateChrome(); break;
+    // The whole engine exited: this view can't be reused; it reloads when you next open the tab.
+    case CoreWebView2ProcessFailedKind.BrowserProcessExited:
+     DisposeView(tab); if (tab == active) { Toast("The browser engine restarted. Reload to continue."); UpdateChrome(); } break;
+    // A hung page usually recovers; an iframe/GPU/utility process restart is handled by the engine itself.
+    case CoreWebView2ProcessFailedKind.RenderProcessUnresponsive:
+     if (tab == active) Toast("This page isn't responding. Wait, or reload it."); break;
+    default: break;
+   }
+  }); };
+  // A page that closes itself (window.close) closes its tab, e.g. download hand-off pages.
+  core.WindowCloseRequested += (_, _) => { if (Off()) return; Dispatcher.BeginInvoke(async () => { if (!tab.Closed) await CloseTab(tab, true); }); };
+  core.ContainsFullScreenElementChanged += (_, _) => { if (Off()) return;  if(tab!=Shown||tab.Closed||closing)return;contentFullScreen=core.ContainsFullScreenElement;ApplyFullScreen(); };
+  core.WebMessageReceived += async (_, e) => { if (Off()) return; 
+   // "Add to Carbon" on a Chrome Web Store page; installing still goes through the permission review.
+   if (e.Source.StartsWith("https://chromewebstore.google.com/", StringComparison.Ordinal) && e.WebMessageAsJson.Contains("\"carbon-store-add\"")) { await PrepareStoreExtension(e.Source); return; }
+   // The memory script says what the page has on (camera, mic, location): the dot on the Permissions button.
+   if (e.WebMessageAsJson.Contains("\"carbon-in-use\"") && e.Source == core.Source) {
+    try { using var m = JsonDocument.Parse(e.WebMessageAsJson); string use = m.RootElement.GetProperty("use").GetString() ?? ""; if (use.Length < 40 && use != tab.InUse) { tab.InUse = use; ShellPublish(); } } catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { }
+    return;
+   }
+   await ReceiveHidden(tab, e);
+  };
+  core.WebMessageReceived += async (_, e) => { if (Off()) return; await ReceiveLogin(tab, e); };
+  if (tab.FileChooserEvents is CoreWebView2DevToolsProtocolEventReceiver chooser) chooser.DevToolsProtocolEventReceived += (_, e) => { if (Off()) return; Dispatcher.BeginInvoke(async () => await OfferFiles(tab, core, e.ParameterObjectAsJson)); };
+  view.IsVisibleChanged += (_, _) => { if (!Off() && view.IsVisible) Dispatcher.BeginInvoke(DispatcherPriority.Loaded, RestorePageWindow); };
+  view.GotFocus += (_, _) => { if (!Off()) FocusSplitSide(tab); }; // clicking the other half of a split view
+ }
+ void OpenPageDialog(BrowserTab tab, CoreWebView2ScriptDialogOpeningEventArgs e)
+ {
+  tab.Dialog?.Deferral.Complete();
+  var dialog = tab.Dialog = new PageDialog(e, e.GetDeferral(), Host(e.Uri));
+  InterruptAgent(tab, new { dialog = new { type = DialogKind(dialog), message = Clip(e.Message, 500), defaultText = e.Kind == CoreWebView2ScriptDialogKind.Prompt ? e.DefaultText : null }, url = tab.Url,
+   note = "The page is paused on this dialog. Answer it with handle_dialog (accept=true or false)." });
+  if (tab == active) ShellPublish();
+ }
+ internal void AnswerPageDialog(BrowserTab tab, bool accept, string? text)
+ {
+  if (tab.Dialog is not { } d) return;
+  tab.Dialog = null;
+  try {
+   if (accept) { if (text != null && d.Args.Kind == CoreWebView2ScriptDialogKind.Prompt) d.Args.ResultText = text; d.Args.Accept(); }
+   d.Deferral.Complete();
+  } catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException) { } // the page is already gone
+  ShellPublish();
+ }
+ static string DialogKind(PageDialog d) => d.Args.Kind switch { CoreWebView2ScriptDialogKind.Confirm => "confirm", CoreWebView2ScriptDialogKind.Prompt => "prompt", CoreWebView2ScriptDialogKind.Beforeunload => "leave page", _ => "alert" };
+ object? PageDialogData() => active?.Dialog is { } d ? new { id = active.Id, kind = DialogKind(d), message = d.Args.Message, defaultText = d.Args.DefaultText, site = d.Site } : null;
+ public static string Host(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) ? (u.IsFile ? Path.GetFileName(u.LocalPath) : u.Host.TrimEnd('.') is var host && host.StartsWith("www.", StringComparison.Ordinal) ? host[4..] : host) : url;
+ public static string ResolveAddress(string input, string engine)
+ {
+  input = input.Trim();
+  if (string.IsNullOrEmpty(input)) return "";
+  if (input.StartsWith("view-source:", StringComparison.OrdinalIgnoreCase)) { var page = ResolveAddress(input[12..], engine); return page.StartsWith("http") || page.StartsWith("file:") ? "view-source:" + page : page; }
+  if (input.StartsWith("chrome://", StringComparison.OrdinalIgnoreCase)) input = "edge://" + input[9..];
+  if (input.StartsWith("edge://", StringComparison.OrdinalIgnoreCase) || input.Equals("about:blank", StringComparison.OrdinalIgnoreCase)) return input.ToLowerInvariant();
+  if (Uri.TryCreate(input, UriKind.Absolute, out var explicitUri) && explicitUri.Scheme is "http" or "https" or "file") return explicitUri.AbsoluteUri;
+  if (File.Exists(input)) return new Uri(Path.GetFullPath(input)).AbsoluteUri;
+  if (!input.Any(char.IsWhiteSpace) && (input.Contains('.') || input.StartsWith("localhost", StringComparison.OrdinalIgnoreCase) || input.StartsWith("[::1]"))) {
+   var scheme = input.StartsWith("localhost", StringComparison.OrdinalIgnoreCase) || input.StartsWith("127.") || input.StartsWith("[::1]") ? "http://" : "https://";
+   if (Uri.TryCreate(scheme + input, UriKind.Absolute, out var domain) && domain.Host.Length > 0) return domain.AbsoluteUri;
+  }
+  return (engine == "Google" ? "https://www.google.com/search?q=" : engine == "Bing" ? "https://www.bing.com/search?q=" : "https://duckduckgo.com/?q=") + Uri.EscapeDataString(input);
+ }
+ async Task Navigate(string input)
+ {
+  string url = ResolveAddress(input, Prefs.SearchEngine);
+  if (url.Length == 0) return;
+  // Edge's own pages that Carbon has a screen for open that screen.
+  switch (url.StartsWith("edge://") ? url[7..].Split('/', '?', '#')[0] : "") {
+   case "settings": ShowSettings(); return;
+   case "history": ShowLibrary(false); return;
+   case "favorites" or "bookmarks": ShowLibrary(true); return;
+   case "downloads": ShowDownloads(); return;
+   case "version": ShowAbout(); return;
+   case "extensions": ShellOpen("extensions"); await PublishBrowserTools("extensions"); return;
+  }
+  CloseSheet(false);
+  if (active == null) await NewTab("", false, false);
+  if (active?.ChatId != null) { await NewTab(url, false, false); return; } // a chat tab stays a chat
+  var tab = active!;
+  if(Host(tab.Url)!=Host(url))tab.Favicon="";
+  tab.Url = url; tab.Reader = false; StartPage.Visibility = Visibility.Collapsed;
+  if (tab.View?.CoreWebView2 is { } core) core.Navigate(url); else await EnsureView(tab);
+  if (tab.View != null && active == tab) { tab.View.Visibility = Visibility.Visible;RestorePageWindow(); tab.View.Focus(); }
+  UpdateChrome(); SaveLater();
+ }
+ void UpdateChrome()
+ {
+  var core = active?.View?.CoreWebView2;
+  BackButton.IsEnabled = core?.CanGoBack == true; ForwardButton.IsEnabled = core?.CanGoForward == true;
+  ReloadButton.Content = active?.Loading == true ? "\uE711" : "\uE72C";
+  LoadProgress.Visibility = active?.Loading == true && panel == "" ? Visibility.Visible : Visibility.Collapsed;
+  var url = active?.Url ?? "";
+  AddressLabel.Text = url.Length == 0 ? "Search or enter an address" : (active?.Private == true ? "Private · " : "") + Host(url);
+  AddressButton.ToolTip = url.Length == 0 ? "Search or enter an address · Ctrl + L" : url + "\nCtrl + L to edit";
+  SecurityGlyph.Text = url.StartsWith("https://") ? "\uE72E" : "\uE721";
+  BookmarkButton.Content = state.Bookmarks.Any(b => b.Url == url) ? "\uE735" : "\uE734";
+  Title = (active == null || active.Url.Length == 0 ? "Carbon" : active.Title + " · Carbon") + (incognito ? " (Incognito)" : "");
+  if(App.IsQa)Title+=" · Test";
+  Title+=" · "+ProfileCatalog.CurrentName();
+  ShellPublish();
+ }
+ void DragWindow(object s, MouseButtonEventArgs e) { if (e.ChangedButton != MouseButton.Left) return; if (e.ClickCount == 2) ToggleMaximize(); else try { DragMove(); } catch (InvalidOperationException) { } }
+ // Pages are native windows that swallow the mouse, so the window edge needs a thin strip of plain WPF
+ // for Windows to offer resizing. Only when the window is a normal (not maximized/full-screen) window.
+ void ApplyResizeEdge(){if(shellRoot!=null)shellRoot.Margin=WindowState==WindowState.Normal&&!IsFullScreen?new Thickness(5):new Thickness(0);}
+ void ToggleMaximize() => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+ void CloseWindow(object s, RoutedEventArgs e) => Close();
+ void MinimizeWindow(object s, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+ void MaximizeWindow(object s, RoutedEventArgs e) => ToggleMaximize();
+ async void BackClick(object s, RoutedEventArgs e) { if (Shown?.View?.CoreWebView2 is { CanGoBack: true } c) c.GoBack(); else await AppStep(-1); }
+ async void ForwardClick(object s, RoutedEventArgs e) { if (Shown?.View?.CoreWebView2 is { CanGoForward: true } c) c.GoForward(); else await AppStep(1); }
+ async void ReloadClick(object s, RoutedEventArgs e) { if (Shown is not { } tab || tab.Url.Length == 0) return; if (tab.View?.CoreWebView2 is { } c) { if (tab.Loading) c.Stop(); else if (tab.ShowingError) c.Navigate(tab.Url); else { tab.Reader = false; c.Reload(); } } else await EnsureView(tab); }
+ void AddressClick(object s, RoutedEventArgs e) => ShowAddress(active?.Url ?? "");
+ void BookmarkClick(object s, RoutedEventArgs e) => ToggleBookmark();
+ void ShieldClick(object s, RoutedEventArgs e) => ShowSiteControls();
+ async void ReaderClick(object s, RoutedEventArgs e) => await ToggleReader();
+ void MenuClick(object s, RoutedEventArgs e) => ShowMenu((Button)s);
+}
