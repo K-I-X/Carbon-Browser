@@ -601,7 +601,8 @@ public partial class MainWindow
    case "aiCheck": aiClis = null; _ = AiRecheck(B("signedIn")); break;
    case "aiToggle": aiOpen = !aiOpen; if (aiOpen) _ = CheckAis(); break;
    case "geminiKey" when S("key").Trim() is { Length: >= 20 and <= 200 } geminiKey && !geminiKey.Any(char.IsWhiteSpace): // the free Gemini key, pasted on Gemini's row
-    ApiKeyStore.Save(GeminiKey.ProviderId, geminiKey); _ = Task.Run(async () => { await CheckAi(AiClis.First(c => c.Id == "gemini")); await Dispatcher.InvokeAsync(() => { PublishAiEverywhere(); Toast("Gemini is ready."); }); }); break;
+    ApiKeyStore.Save(GeminiKey.ProviderId, geminiKey); await CheckAi(AiClis.First(c => c.Id == "gemini")); PublishAiEverywhere(); Toast("Gemini is ready."); break;
+   case "geminiKey": Toast("That doesn't look like a Gemini key. Copy the whole key from Google AI Studio (it starts with AIza) and paste it again."); break;
    case "aiStatus": _ = CheckAis(); break; // Model settings or a Model tab opened: what's installed and logged in, at most every 30 s
    case "aiAsk" when S("text").Trim() is { Length: > 0 and <= 20000 } ask: // typed in the address bar: a new chat, in its own tab
     var into = active is { Url.Length: 0, ChatId: null, Private: false } blank ? blank : await NewTab("", false, false);
