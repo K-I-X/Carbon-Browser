@@ -59,9 +59,8 @@ internal static class ErrorPages
   // Only link back to web URLs; never echo other schemes into an href.
   string retry = u != null && u.Scheme is "http" or "https" or "file" ? u.AbsoluteUri : "";
   string search = (searchEngine == "Bing" ? "https://www.bing.com/search?q=" : searchEngine == "DuckDuckGo" ? "https://duckduckgo.com/?q=" : "https://www.google.com/search?q=") + Uri.EscapeDataString(host);
-  // Carbon's colors: graphite, with its violet-to-cyan accent.
-  string bg = dark ? "#0b0a14" : "#f7f6ff", glow = dark ? "rgba(124,108,255,.22)" : "rgba(124,108,255,.16)", ink = dark ? "#f2f0ff" : "#17142e", muted = dark ? "#9a95b8" : "#5d5a7a",
-   line = dark ? "rgba(255,255,255,.1)" : "rgba(23,20,46,.12)", card = dark ? "rgba(255,255,255,.04)" : "rgba(255,255,255,.7)";
+  // Still's colors, exactly as Still draws this page.
+  string bg = dark ? "#1C1C1E" : "#FCFBF8", ink = dark ? "#EFEFEA" : "#1B1B1A", muted = dark ? "#8E8F89" : "#6B6C67", line = dark ? "#262626" : "#E3E3DF", btnBg = dark ? "#EFEFEA" : "#1B1B1A", btnInk = dark ? "#000" : "#FAFAF9";
   string script = "";
   if (game != null) {
    string save = System.Text.Json.JsonSerializer.Serialize(new { best = game.Best, bestDist = game.BestDistance, electrons = game.Electrons, skin = game.Skin, mute = game.Mute, day = game.Day, done = game.Done, dark });
@@ -78,39 +77,37 @@ internal static class ErrorPages
    <div id='back' class='back' hidden role='status'><b>You're back online.</b>{(retry.Length > 0 ? $"<a class='btn primary' href='{e(retry)}'>Open {e(host)}</a>" : "")}</div>
    """;
   return $@"<!doctype html><html><head><meta charset='utf-8'><meta name='color-scheme' content='{(dark ? "dark" : "light")}'><title>{e(k.Title)}</title><style>
-html,body{{margin:0;min-height:100%;background:{bg};color:{ink};font:15px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}}
-body{{background:radial-gradient(900px 500px at 15% -10%,{glow},transparent 60%),radial-gradient(700px 400px at 100% 0%,rgba(34,211,238,.10),transparent 60%),{bg}}}
-main{{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 24px;box-sizing:border-box;gap:22px}}
-.card{{width:min(860px,100%);animation:in .5s cubic-bezier(.22,1,.36,1) both}}
-@keyframes in{{from{{opacity:0;transform:translateY(12px) scale(.99)}}to{{opacity:1;transform:none}}}}
+html,body{{margin:0;height:100%;background:{bg};color:{ink};font:15px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}}
+main{{min-height:100%;display:flex;flex-direction:column;gap:28px;align-items:center;justify-content:center;padding:40px;box-sizing:border-box}}
+.card{{max-width:520px;animation:in .45s cubic-bezier(.22,1,.36,1) both}}
+@keyframes in{{from{{opacity:0;transform:translateY(10px)}}to{{opacity:1;transform:none}}}}
 @media (prefers-reduced-motion:reduce){{.card,.game{{animation:none}}}}
-.icon{{width:52px;height:52px;display:grid;place-items:center;border-radius:16px;background:linear-gradient(135deg,rgba(124,108,255,.22),rgba(34,211,238,.16));border:1px solid {line}}}
-svg{{width:28px;height:28px;stroke:{ink};fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}}
-h1{{font-size:34px;font-weight:750;letter-spacing:-.025em;margin:20px 0 6px}}
+svg{{width:44px;height:44px;stroke:{ink};fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.9}}
+h1{{font-size:30px;font-weight:650;letter-spacing:-.02em;margin:22px 0 8px}}
 p{{color:{muted};margin:0 0 6px}}
-.host{{color:{ink};font-weight:650}}
-.row{{display:flex;gap:10px;margin-top:22px;flex-wrap:wrap}}
-a.btn{{display:inline-flex;align-items:center;height:40px;padding:0 20px;border-radius:12px;text-decoration:none;font-weight:650;font-size:14px;transition:transform .15s,box-shadow .2s,opacity .2s}}
-a.primary{{background:linear-gradient(135deg,#7c6cff,#22d3ee);color:#fff;box-shadow:0 6px 22px rgba(124,108,255,.35)}} a.ghost{{color:{ink};border:1px solid {line};background:{card}}}
-a.btn:hover{{transform:translateY(-1px);box-shadow:0 10px 28px rgba(124,108,255,.45)}} a.btn:active{{transform:translateY(1px) scale(.98)}}
-code{{display:block;margin-top:22px;color:{muted};font:12px ui-monospace,Consolas,monospace;opacity:.7}}
-.game{{width:min(860px,100%);animation:in .6s .12s cubic-bezier(.22,1,.36,1) both}}
-canvas{{display:block;width:100%;height:clamp(240px,42vh,360px);border-radius:20px;border:1px solid {line};box-shadow:0 20px 60px rgba(0,0,0,{(dark ? ".45" : ".12")});outline:none;cursor:pointer;touch-action:none}}
-canvas:focus-visible{{box-shadow:0 0 0 3px rgba(124,108,255,.6)}}
+.host{{color:{ink};font-weight:600}}
+.row{{display:flex;gap:10px;margin-top:26px;flex-wrap:wrap}}
+a.btn{{display:inline-flex;align-items:center;height:38px;padding:0 18px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px}}
+a.primary{{background:{btnBg};color:{btnInk}}} a.ghost{{color:{ink};border:1px solid {line}}}
+a.btn:hover{{opacity:.85}}
+code{{display:block;margin-top:28px;color:{muted};font:12px ui-monospace,Consolas,monospace;opacity:.8}}
+.game{{width:min(760px,100%);animation:in .45s .1s cubic-bezier(.22,1,.36,1) both}}
+canvas{{display:block;width:100%;height:clamp(220px,38vh,320px);border-radius:12px;border:1px solid {line};outline:none;cursor:pointer;touch-action:none}}
+canvas:focus-visible{{box-shadow:0 0 0 2px {muted}}}
 .hint{{text-align:center;font-size:12px;margin-top:10px}}
-.back{{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;padding:10px 12px 10px 18px;border-radius:16px;background:{card};backdrop-filter:blur(14px);border:1px solid {line};box-shadow:0 12px 40px rgba(0,0,0,.3);animation:in .4s both}}
+.back{{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;padding:8px 8px 8px 16px;border-radius:12px;background:{bg};border:1px solid {line};box-shadow:0 8px 30px rgba(0,0,0,.25);animation:in .4s both}}
 .back[hidden]{{display:none}}
-.saved{{width:min(860px,100%)}} .saved h2{{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:{muted};margin:0 0 10px}}
-.saved div{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}}
-.saved button{{text-align:left;padding:12px 14px;border-radius:14px;border:1px solid {line};background:{card};color:{ink};font:inherit;cursor:pointer;transition:transform .2s,border-color .2s}}
-.saved button:hover{{transform:translateY(-2px);border-color:rgba(124,108,255,.6)}} .saved b{{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}} .saved small{{color:{muted};font-size:12px}}
+.saved{{width:min(760px,100%)}} .saved h2{{font-size:13px;font-weight:600;color:{muted};margin:0 0 10px}}
+.saved div{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}}
+.saved button{{text-align:left;padding:10px 14px;border-radius:10px;border:1px solid {line};background:transparent;color:{ink};font:inherit;cursor:pointer}}
+.saved button:hover{{opacity:.85}} .saved b{{display:block;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}} .saved small{{color:{muted};font-size:12px}}
 </style></head><body><main><div class='card'>
-<div class='icon'><svg viewBox='0 0 24 24'>{k.Icon}</svg></div>
+<svg viewBox='0 0 24 24'>{k.Icon}</svg>
 <h1>{e(k.Title)}</h1>
 <p><span class='host'>{e(host)}</span></p>
 <p>{e(k.Body)}</p>
 <div class='row'>{(retry.Length > 0 && !certificate ? $"<a class='btn primary' href='{e(retry)}'>Try again</a>" : "")}{(k.Search ? $"<a class='btn ghost' href='{e(search)}'>Search for {e(host)}</a>" : "")}</div>
-{(game == null ? $"<code>{e(code)}</code>" : "")}
+<code>{e(code)}</code>
 </div>{gameHtml}</main>{script}</body></html>";
  }
 }

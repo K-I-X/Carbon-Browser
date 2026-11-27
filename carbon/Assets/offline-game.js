@@ -255,8 +255,8 @@
  };
 
  // ---------- drawing ----------
- const C = DARK ? { sky1: '#0b0a16', sky2: '#17132e', ground: '#8b7bff', grid: 'rgba(139,123,255,.16)', far: '#1d1838', near: '#241d45', ink: '#f2f0ff', mute: '#9a95b8', panel: 'rgba(14,12,28,.82)' }
-  : { sky1: '#eef0ff', sky2: '#dcdcff', ground: '#6b5cf0', grid: 'rgba(107,92,240,.16)', far: '#cfcdf5', near: '#bdb8ef', ink: '#17142e', mute: '#5d5a7a', panel: 'rgba(255,255,255,.86)' };
+ const C = DARK ? { sky1: '#161618', sky2: '#222225', ground: '#8b7bff', grid: 'rgba(239,239,234,.07)', far: '#2a2a2e', near: '#303034', ink: '#EFEFEA', mute: '#8E8F89', panel: 'rgba(28,28,30,.86)' }
+  : { sky1: '#f6f5f1', sky2: '#ebe9e3', ground: '#6b5cf0', grid: 'rgba(27,27,26,.07)', far: '#dedbd4', near: '#d3d0c8', ink: '#1B1B1A', mute: '#6B6C67', panel: 'rgba(252,251,248,.88)' };
  const hex = (x, y, r, rot = 0) => { ctx.beginPath(); for (let i = 0; i < 6; i++) { const a = rot + i * Math.PI / 3 + Math.PI / 6; ctx[i ? 'lineTo' : 'moveTo'](x + Math.cos(a) * r, y + Math.sin(a) * r); } ctx.closePath(); };
  // Light mode: the neon text colors, darkened so they read on a pale sky.
  const LIGHT_INK = { '#ffd25c': '#a16207', '#7dff9b': '#15803d', '#5ff2ff': '#0e7490', '#c28bff': '#7c3aed', '#fff': '#17142e' };
@@ -268,7 +268,7 @@
   ctx.save(); ctx.translate(cx, cy + (1 - sq) * 6); ctx.scale(1 / sq, sq);
   ctx.shadowColor = color; ctx.shadowBlur = reduce ? 0 : 18;
   ctx.fillStyle = color; hex(0, 0, 15, state === 'play' && !P.ground ? t * 6 : 0); ctx.fill();
-  ctx.shadowBlur = 0; ctx.fillStyle = DARK ? '#0b0a16' : '#ffffff'; hex(0, 0, 8.5, state === 'play' && !P.ground ? t * 6 : 0); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = DARK ? '#1C1C1E' : '#ffffff'; hex(0, 0, 8.5, state === 'play' && !P.ground ? t * 6 : 0); ctx.fill();
   // eyes
   ctx.fillStyle = DARK ? '#ffffff' : '#17142e';
   const eh = P.blink > 0 ? 1 : 4.2;
@@ -295,7 +295,7 @@
   ctx.fillStyle = C.near;
   for (const hl of hills) { const x = ((hl.x - bgX * .45) % 1560 + 1560) % 1560 - 200; ctx.beginPath(); ctx.ellipse(x + hl.w / 2, GROUND, hl.w / 2, hl.h, 0, Math.PI, 0); ctx.fill(); }
   // ground: a glowing line over a moving grid, with the gaps cut out
-  ctx.fillStyle = DARK ? '#0d0b1c' : '#e7e6ff'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = DARK ? '#18181a' : '#efede8'; ctx.fillRect(0, GROUND, W, H - GROUND);
   ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
   for (let i = 0; i < 4; i++) { const y = GROUND + 8 + i * i * 4; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
   for (let x = -((bgX) % 40); x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, GROUND); ctx.lineTo(x - (W / 2 - x) * .25, H); ctx.stroke(); }
@@ -305,7 +305,7 @@
   for (const gp of gaps) { ctx.moveTo(from, GROUND); ctx.lineTo(Math.max(from, gp.x), GROUND); from = gp.x + gp.w; }
   ctx.moveTo(from, GROUND); ctx.lineTo(W, GROUND); ctx.stroke(); ctx.shadowBlur = 0;
   for (const gp of gaps) {
-   ctx.fillStyle = DARK ? '#04030a' : '#bdb8ef'; ctx.fillRect(gp.x, GROUND - 1, gp.w, H - GROUND + 2);
+   ctx.fillStyle = DARK ? '#0a0a0b' : '#c9c6be'; ctx.fillRect(gp.x, GROUND - 1, gp.w, H - GROUND + 2);
    for (let i = 0; i < 3; i++) { ctx.fillStyle = i % 2 ? '#ffcc33' : '#17142e'; ctx.fillRect(gp.x - 6, GROUND + i * 6, 6, 6); ctx.fillRect(gp.x + gp.w, GROUND + i * 6, 6, 6); }
   }
   // the flag where your best run ended

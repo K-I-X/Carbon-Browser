@@ -11,6 +11,7 @@ export type Look = { theme: ThemeId; accent: string; backdrop: Backdrop; image: 
 
 // acc: the accent; acc2: the second color of its gradients; h: the hue that tints the surfaces.
 export const THEMES: { id: ThemeId; name: string; acc: string; acc2: string; h: number }[] = [
+ { id: "classic", name: "Classic", acc: "#8e8e95", acc2: "#c9c9cf", h: 0 }, // Still's own look, and Carbon's default
  { id: "carbon", name: "Carbon", acc: "#7c6cff", acc2: "#22d3ee", h: 275 },
  { id: "midnight", name: "Midnight", acc: "#4f8cff", acc2: "#a78bfa", h: 245 },
  { id: "aurora", name: "Aurora", acc: "#2dd4bf", acc2: "#a3e635", h: 185 },
@@ -19,7 +20,6 @@ export const THEMES: { id: ThemeId; name: string; acc: string; acc2: string; h: 
  { id: "forest", name: "Forest", acc: "#34c77b", acc2: "#b5e655", h: 150 },
  { id: "neon", name: "Neon", acc: "#ff2bd6", acc2: "#00e5ff", h: 305 },
  { id: "gold", name: "Gold", acc: "#f5b83d", acc2: "#ff7a45", h: 70 },
- { id: "classic", name: "Classic", acc: "#8e8e95", acc2: "#c9c9cf", h: 0 },
 ]
 export const BACKDROPS: { id: Backdrop; name: string }[] = [
  { id: "aurora", name: "Aurora" }, { id: "stars", name: "Stars" }, { id: "waves", name: "Waves" }, { id: "grid", name: "Grid" },
@@ -29,9 +29,10 @@ export const WIDGETS: { id: WidgetId; name: string }[] = [
  { id: "clock", name: "Clock" }, { id: "links", name: "Quick links" }, { id: "notes", name: "Notes" },
  { id: "todo", name: "To-do" }, { id: "timer", name: "Focus timer" }, { id: "quote", name: "Quote of the day" },
 ]
-export const DEFAULT_LOOK: Look = { theme: "carbon", accent: "", backdrop: "aurora", image: "", dim: 35, widgets: ["clock", "links", "todo", "timer"], glass: true }
+// Out of the box Carbon looks exactly like Still: its own colors, a plain new tab, no widgets. The rest is opt-in.
+export const DEFAULT_LOOK: Look = { theme: "classic", accent: "", backdrop: "none", image: "", dim: 35, widgets: [], glass: false }
 
-const KEY = "carbon.look"
+const KEY = "carbon.look.v2" // v2: the default became Still's look, so earlier saved looks are left behind
 export function readLook(): Look {
  try { const saved = JSON.parse(localStorage.getItem(KEY) ?? "null"); if (saved && typeof saved === "object") return { ...DEFAULT_LOOK, ...saved } } catch { /* no storage, or a broken value: the default look */ }
  return DEFAULT_LOOK

@@ -150,6 +150,7 @@ export function Widgets({ send }: { send: Send }) {
  const [editing, setEditing] = useState(false)
  const on = (id: WidgetId) => look.widgets.includes(id)
  const toggle = (id: WidgetId) => setLook({ widgets: on(id) ? look.widgets.filter(w => w !== id) : [...look.widgets, id] })
+ if (!look.widgets.length) return null // none on (the default): the new tab is exactly Still's; Settings > Appearance turns them on
  const shown: Record<WidgetId, ReactNode> = { clock: <Clock key="clock" />, links: <Links key="links" send={send} />, notes: <Notes key="notes" />, todo: <Todos key="todo" />, timer: <Timer key="timer" />, quote: <Quote key="quote" /> }
  return <div className="widgets">
   {on("clock") && shown.clock}

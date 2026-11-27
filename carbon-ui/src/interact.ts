@@ -2,11 +2,14 @@
 // Pure decoration: nothing here changes what a click does. Off with reduced motion.
 
 const reduce = matchMedia("(prefers-reduced-motion: reduce)")
-const RIPPLE = "[data-slot=button], .home-chips button, .home-idea, .speed-dial-tile, .widget-btn, .widget-link > button:first-child, .ext-card-action, .theme-swatch, .backdrop-chip, .widgets-customize"
-const GLOW = ".home-idea, .widget, .ext-card, .mate-card, .theme-swatch, .speed-dial-tile, .ext-pick"
+const RIPPLE = "[data-slot=button], .home-chips button, .home-idea, .speed-dial-tile, .widget-btn, .widget-link > button:first-child, .theme-swatch, .backdrop-chip, .widgets-customize"
+const GLOW = ".home-idea, .widget, .mate-card, .theme-swatch, .speed-dial-tile"
+
+// Only with a color theme on: the Classic look (the default) is exactly Still's, effects and all.
+const themed = () => !!document.documentElement.dataset.carbon
 
 addEventListener("pointerdown", e => {
- if (reduce.matches || e.button !== 0) return
+ if (reduce.matches || e.button !== 0 || !themed()) return
  const el = (e.target as Element | null)?.closest<HTMLElement>(RIPPLE)
  if (!el || el.matches(":disabled, [aria-disabled=true]")) return
  const r = el.getBoundingClientRect(), size = Math.max(r.width, r.height) * 2.2
@@ -21,7 +24,7 @@ addEventListener("pointerdown", e => {
 
 let frame = 0, last: PointerEvent | null = null
 addEventListener("pointermove", e => {
- if (reduce.matches) return
+ if (reduce.matches || !themed()) return
  last = e
  if (frame) return
  frame = requestAnimationFrame(() => {

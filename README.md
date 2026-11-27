@@ -33,11 +33,11 @@ The "You're offline" page has a game. Carby, a little carbon ring, runs through 
 Still's blocker now reads **EasyList, EasyPrivacy and Peter Lowe's list** (refreshed every few days), with full support for their network rules and element hiding. It also **skips YouTube video ads** and hides ad slots. You can turn it off for one site from the Site button.
 
 ### Looks and feel
+- **Looks exactly like Still out of the box**: Still's colors, new tab, extensions page and error pages. Everything below is optional, in **Settings > Appearance**.
 - **9 color themes** (Carbon, Midnight, Aurora, Ember, Sakura, Forest, Neon, Gold, Classic) that tint the whole window, plus any accent color you pick.
 - **New tab backgrounds:** aurora, stars, waves, grid and bubbles, or any picture or video from the internet, with a softness slider.
 - **New tab widgets** (from Bullet): clock, quick links, notes, to-do, a focus timer and a quote of the day.
-- **Extensions, redone:** cards with each extension's icon, on/off, open, options and remove, search, and popular picks from the Chrome Web Store.
-- **More alive:** ripples when you click, cards that light up under the pointer, springy hovers, and frosted menus. Reduced-motion settings are respected.
+- **More alive** with a color theme on: ripples when you click, cards that light up under the pointer, springy hovers, and frosted menus. Reduced-motion settings are respected.
 - **Save page for offline** (from Bullet's website saver).
 
 ### And everything Still has
