@@ -1069,7 +1069,7 @@ public partial class MainWindow
    }
    const main = document.querySelector('main, article, [role=main]') || document.body;
    const heads = [...document.querySelectorAll('h1, h2')].slice(0, 8).map(h => clip(h.innerText, 90)).filter(Boolean).join(' | ');
-   return { sel, focus, heads, text: clip(main ? main.innerText : '', 3000) };
+   return { sel, focus, heads, text: '' }; // the page's text stays out: read_page gets it when it's needed
   })()
   """;
  /// What's on the active tab right now: what the user selected, the field they're in, the headings and the start of its
@@ -1080,7 +1080,7 @@ public partial class MainWindow
   if (chat.Ephemeral || active is not { Private: false } tab || tab.View?.CoreWebView2 is not { } core || !tab.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return "";
   if (chat is { Profile: CompanionProfile } && tab.ChatId == null && tab.Engine != CompanionEngine && (tab.InChat ?? tab.RunChat) != chat.Id) return "";
   try {
-   string raw = await core.ExecuteScriptAsync(GlanceJs).WaitAsync(TimeSpan.FromMilliseconds(400));
+   string raw = await core.ExecuteScriptAsync(GlanceJs).WaitAsync(TimeSpan.FromMilliseconds(150));
    using var doc = JsonDocument.Parse(raw);
    if (doc.RootElement.ValueKind != JsonValueKind.Object) return "";
    string Get(string k) => doc.RootElement.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
@@ -1212,13 +1212,6 @@ public partial class MainWindow
    && (m.Text.EndsWith("answered instead.", StringComparison.Ordinal) || m.Text.EndsWith("answered this one.", StringComparison.Ordinal))) is var handed and >= 0) {
    chat.Messages[handed].Text += " This chat is back on Carbon AI."; // once: picking another AI for it later sticks
    chat.Harness = CarbonAi.Id; chat.Session = null; chat.Started = false; cli = CarbonAi.Adapter;
-  }
-  // Carbon AI's free models out of reach from this network: the chat shows the message and why, instead of waiting.
-  if (cli is CarbonAiAdapter && CarbonAi.Ready && await CarbonAi.Problem() is { } why) {
-   chat.Messages.Add(new() { Role = "user", Text = shown ?? text });
-   chat.Error = $"Carbon AI can't answer right now: {why}. Try again on another network.";
-   CarbonAi.Forget(); chat.Updated = DateTime.UtcNow; SaveAiChats(); PublishAiEverywhere();
-   return;
   }
   if (FindCli(cli.Command) is not { } exe) {
    aiPending = shown ?? text; aiPendingChat = chat;
