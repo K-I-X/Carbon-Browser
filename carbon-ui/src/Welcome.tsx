@@ -356,7 +356,7 @@ export function Welcome({ theme, talk, ai, noAi, sounds = true, soundsBlocked = 
     <motion.section key={(again ? "again" : at + (reviewing ? "-review" : chatting ? "-chat" : "")) + (introOn ? "-held" : "")} className="ob-talk" onScroll={fadeTop} {...slide} transition={{ duration: reduce ? .01 : .26, ease: EASE }}>
      {introOn ? null : again ? (who ? <Interview who={who} send={send} onClose={() => finish()} onDone={(done, first) => { setTalked(done); setFirstUp(first) }} /> : null) : <>
      {at === "welcome" && <>
-      <motion.h1 className="ob-headline" initial={{ opacity: 0, y: reduce ? 0 : 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: reduce ? 0 : intro, duration: reduce ? .01 : .35, ease: EASE }}>A little less work. A little more still.</motion.h1>
+      <motion.h1 className="ob-headline" initial={{ opacity: 0, y: reduce ? 0 : 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: reduce ? 0 : intro, duration: reduce ? .01 : .35, ease: EASE }}>Less busywork. More done.</motion.h1>
       <Bubbles from={intro} lines={canAi ? ["Carbon is a browser with a companion that works in your tabs with you.", "It works with an AI app on your computer. Let's make your companion. It takes a couple of minutes."]
        : ["Carbon is an open-source browser. AI apps on this computer can work in it, right next to your tabs."]} />
      </>}

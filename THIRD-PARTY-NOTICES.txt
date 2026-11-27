@@ -1,17 +1,19 @@
-Carbon, Copyright (c) 2026 Carbon. Released under the GNU Affero General Public License v3.0 or later (see LICENSE).
+Carbon is a modified version of Still (https://github.com/carbongotfound/still), Copyright (c) 2026 Carbon (carbongotfound),
+released under the GNU Affero General Public License v3.0 or later (see LICENSE and NOTICE).
 
 ORIGINAL WORK
 The companion mascots are Carbon's own: the 3D models and animations in
 carbon-ui/public/companion (*.glb, fit.json), the portraits in carbon-ui/src/assets/companion,
 the faces the app draws on them, and the Blender scripts that build and render them
-(tools/mascot). So are the app icon (carbon/Assets/carbon.ico, still.png) and the favicon.
+(tools/mascot). So are the app icon (carbon/Assets/carbon.ico, carbon.png) and the favicon.
 They contain no third-party models, textures, fonts or art, and they are covered by
 Carbon's AGPL-3.0-or-later license like the rest of the code. The same goes for the sounds in
 carbon-ui/public/sounds (*.ogg): tools/sound/build.py synthesizes every one of them
 from sine waves and noise, with nothing sampled or downloaded.
 
-Carbon ships no AI models. It works through the AI service you
-sign into yourself.
+Carbon ships no AI models. Carbon AI downloads OpenCode's program (MIT License) from npm on the first start and
+runs it on OpenCode's free models; other AIs work through the service you sign into yourself. The ad blocker
+downloads EasyList, EasyPrivacy and Peter Lowe's list while it runs (see NOTICE).
 
 INTERFACE (bundled into the app as carbon/Shell)
 React, React DOM, scheduler ............... MIT, Meta Platforms, Inc. and affiliates

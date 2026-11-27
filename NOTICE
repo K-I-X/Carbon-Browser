@@ -1,0 +1,28 @@
+Carbon
+Released under the GNU Affero General Public License v3.0 or later (see LICENSE).
+
+Carbon is a modified version of Still, https://github.com/carbongotfound/still
+Still, Copyright (c) 2026 Carbon (carbongotfound). Released under the GNU Affero General Public License v3.0 or later.
+Where Still's files say "Carbon" as the copyright holder, that is Still's author.
+
+Changes made for Carbon (2026):
+- Renamed from Still to Carbon (names, folders, app id, installer, update source); new app icon.
+- Carbon AI: a free built-in AI that runs OpenCode's program on its free models (carbon/Agents/CarbonAi.cs);
+  a quick look at the active tab with each message; know-how for typing, documents, schoolwork and common sites;
+  Word (.docx) and web page (.html) files from save_file (carbon/DocMaker.cs).
+- Signal Run, the offline page's game (carbon/Assets/offline-game.js), and error pages in Carbon's look.
+- The ad blocker reads EasyList, EasyPrivacy and Peter Lowe's list, and skips YouTube ads (carbon/AdBlock.cs).
+- Color themes, new tab backgrounds and widgets, the extensions page, interaction effects (carbon-ui/src/theme.ts,
+  Widgets.tsx, LookSettings.tsx, interact.ts, carbon-theme.css, BrowserTools.tsx).
+- Save page for offline (carbon/MainWindow.Offline.cs).
+
+Carbon's themes, new tab widgets and backgrounds, and website saver are adapted from Bullet,
+https://github.com/K-I-X/Bullet-Browser (GNU Affero General Public License v3.0 or later).
+
+Downloaded while Carbon runs, not shipped with it:
+- OpenCode (https://opencode.ai, MIT License), from npm, for Carbon AI. Its free models are provided by OpenCode
+  under OpenCode's own terms.
+- EasyList and EasyPrivacy (https://easylist.to, GPL-3.0 or CC BY-SA 3.0) and Peter Lowe's ad server list
+  (https://pgl.yoyo.org/adservers), under their own terms.
+
+Everything else Carbon uses is listed in THIRD-PARTY-NOTICES.txt and the Licenses folder.

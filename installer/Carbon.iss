@@ -13,11 +13,11 @@
   #define Bootstrapper "..\tools\MicrosoftEdgeWebview2Setup.exe"
 #endif
 #ifndef AppVersion
-  #define AppVersion "2.11.0"
+  #define AppVersion "1.0.0"
 #endif
 
 [Setup]
-AppId={{B734FE19-F6F3-4536-B1C8-250A22AF1A34}
+AppId={{B8384B5A-3D3D-46D3-89AF-2D4984C9961A}
 AppName=Carbon
 AppVersion={#AppVersion}
 AppVerName=Carbon {#AppVersion}
