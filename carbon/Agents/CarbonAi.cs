@@ -29,6 +29,8 @@ static class CarbonAi
  public static bool Ready => File.Exists(Exe);
  /// How long a free model may stay silent (no words, no step) before the next one answers instead.
  public static readonly TimeSpan Patience = TimeSpan.FromSeconds(60);
+ /// How long OpenCode may take to start talking to a model at all (a step starting); longer means it's stuck before the model.
+ public static readonly TimeSpan Start = TimeSpan.FromSeconds(25);
  /// The free models OpenCode listed last, best first. Runs use the first unless the user picked another free one.
  public static List<string> Free { get; set; } = [];
  /// Free models that failed or went quiet lately: skipped for 10 minutes, so the next message goes to one that answers.
@@ -55,6 +57,22 @@ static class CarbonAi
  };
 
  static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+ static (DateTime At, string? Why) probed;
+ /// Why Carbon AI can't answer from this network right now, or null when it can: its free models live at opencode.ai, which
+ /// some school and work networks block. Any answer from there counts; checked at most every 2 minutes, in 6 seconds at most.
+ public static async Task<string?> Problem()
+ {
+  if (DateTime.UtcNow - probed.At < TimeSpan.FromMinutes(2)) return probed.Why;
+  string? why = null;
+  try {
+   using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+   using var res = await Http.GetAsync("https://opencode.ai/zen/v1/models", HttpCompletionOption.ResponseHeadersRead, cts.Token);
+  } catch (OperationCanceledException) { why = "opencode.ai, where its free models are, didn't answer. This network may block it"; }
+  catch (HttpRequestException) { why = "it can't reach opencode.ai, where its free models are. This network may block it, or you're offline"; }
+  probed = (DateTime.UtcNow, why);
+  return why;
+ }
+ public static void Forget() => probed = default; // the next message checks again
  static Task<bool>? installing;
  /// Downloads and checks OpenCode's program once (about 60 MB). Says how far it got through changed. True when it's ready.
  public static Task<bool> Install(Action changed) => installing ??= Task.Run(async () => {
