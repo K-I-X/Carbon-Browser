@@ -39,41 +39,84 @@ internal static class ErrorPages
   };
  }
 
- public static string Crashed(string url, bool dark) => Render(new(Alert, "This page crashed", "Something on this page made it stop working. Your other tabs are fine."), url, dark, "", false, "RenderProcessExited");
+ public static string Crashed(string url, bool dark) => Render(new(Alert, "This page crashed", "Something on this page made it stop working. Your other tabs are fine."), url, dark, "", false, "RenderProcessExited", null);
 
- public static string Html(CoreWebView2WebErrorStatus status, bool certificate, string url, bool dark, string searchEngine)
-  => Render(Pick(status, certificate), url, dark, searchEngine, certificate, status.ToString());
+ public static string Html(CoreWebView2WebErrorStatus status, bool certificate, string url, bool dark, string searchEngine, OfflineGame? game = null)
+ {
+  var kind = Pick(status, certificate);
+  return Render(kind, url, dark, searchEngine, certificate, status.ToString(), kind.Icon == Wifi ? game ?? new() : null);
+ }
 
- static string Render(Kind k, string url, bool dark, string searchEngine, bool certificate, string code)
+ /// Signal Run (Assets/offline-game.js), with the player's saved best, electrons and skin. Read once.
+ static string? gameJs;
+ static string GameJs => gameJs ??= AppContent.ReadAsset("offline-game.js").GetAwaiter().GetResult();
+
+ static string Render(Kind k, string url, bool dark, string searchEngine, bool certificate, string code, OfflineGame? game)
  {
   string host = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : url;
   string e(string s) => WebUtility.HtmlEncode(s);
   // Only link back to web URLs; never echo other schemes into an href.
   string retry = u != null && u.Scheme is "http" or "https" or "file" ? u.AbsoluteUri : "";
   string search = (searchEngine == "Bing" ? "https://www.bing.com/search?q=" : searchEngine == "DuckDuckGo" ? "https://duckduckgo.com/?q=" : "https://www.google.com/search?q=") + Uri.EscapeDataString(host);
-  string bg = dark ? "#1C1C1E" : "#FCFBF8", ink = dark ? "#EFEFEA" : "#1B1B1A", muted = dark ? "#8E8F89" : "#6B6C67", line = dark ? "#262626" : "#E3E3DF", btnBg = dark ? "#EFEFEA" : "#1B1B1A", btnInk = dark ? "#000" : "#FAFAF9";
-  return $@"<!doctype html><html><head><meta charset='utf-8'><title>{e(k.Title)}</title><style>
-html,body{{margin:0;height:100%;background:{bg};color:{ink};font:15px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}}
-main{{min-height:100%;display:flex;align-items:center;justify-content:center;padding:40px;box-sizing:border-box}}
-.card{{max-width:520px;animation:in .45s cubic-bezier(.22,1,.36,1) both}}
-@keyframes in{{from{{opacity:0;transform:translateY(10px)}}to{{opacity:1;transform:none}}}}
-@media (prefers-reduced-motion:reduce){{.card{{animation:none}}}}
-svg{{width:44px;height:44px;stroke:{ink};fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.9}}
-h1{{font-size:30px;font-weight:650;letter-spacing:-.02em;margin:22px 0 8px}}
+  // Carbon's colors: graphite, with its violet-to-cyan accent.
+  string bg = dark ? "#0b0a14" : "#f7f6ff", glow = dark ? "rgba(124,108,255,.22)" : "rgba(124,108,255,.16)", ink = dark ? "#f2f0ff" : "#17142e", muted = dark ? "#9a95b8" : "#5d5a7a",
+   line = dark ? "rgba(255,255,255,.1)" : "rgba(23,20,46,.12)", card = dark ? "rgba(255,255,255,.04)" : "rgba(255,255,255,.7)";
+  string script = "";
+  if (game != null) {
+   string save = System.Text.Json.JsonSerializer.Serialize(new { best = game.Best, bestDist = game.BestDistance, electrons = game.Electrons, skin = game.Skin, mute = game.Mute, day = game.Day, done = game.Done, dark });
+   script = "<script>window.CARBON_OFFLINE=" + save.Replace("<", "\\u003c") + ";</script><script>" + GameJs.Replace("</script", "<\\/script") + "</script>"
+    + "<script>(()=>{const b=document.getElementById('back');let was=navigator.onLine;const on=()=>{if(navigator.onLine&&!was)b.hidden=false;was=navigator.onLine};addEventListener('online',()=>{was=false;on()});addEventListener('offline',()=>{was=false});setInterval(on,3000);})();</script>";
+  }
+  string gameHtml = game == null ? "" : $"""
+   <section class='game' aria-label='Signal Run, a game to play while you're offline'>
+    <canvas id='signal-run' aria-label='Signal Run. Press Space to start.'></canvas>
+    <p class='hint'>Signal Run · Space or tap to jump, twice to double-jump, ↓ to duck · M sound · P pause</p>
+   </section>
+   <div id='back' class='back' hidden role='status'><b>You're back online.</b>{(retry.Length > 0 ? $"<a class='btn primary' href='{e(retry)}'>Open {e(host)}</a>" : "")}</div>
+   """;
+  return $@"<!doctype html><html><head><meta charset='utf-8'><meta name='color-scheme' content='{(dark ? "dark" : "light")}'><title>{e(k.Title)}</title><style>
+html,body{{margin:0;min-height:100%;background:{bg};color:{ink};font:15px/1.55 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif}}
+body{{background:radial-gradient(900px 500px at 15% -10%,{glow},transparent 60%),radial-gradient(700px 400px at 100% 0%,rgba(34,211,238,.10),transparent 60%),{bg}}}
+main{{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 24px;box-sizing:border-box;gap:22px}}
+.card{{width:min(860px,100%);animation:in .5s cubic-bezier(.22,1,.36,1) both}}
+@keyframes in{{from{{opacity:0;transform:translateY(12px) scale(.99)}}to{{opacity:1;transform:none}}}}
+@media (prefers-reduced-motion:reduce){{.card,.game{{animation:none}}}}
+.icon{{width:52px;height:52px;display:grid;place-items:center;border-radius:16px;background:linear-gradient(135deg,rgba(124,108,255,.22),rgba(34,211,238,.16));border:1px solid {line}}}
+svg{{width:28px;height:28px;stroke:{ink};fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}}
+h1{{font-size:34px;font-weight:750;letter-spacing:-.025em;margin:20px 0 6px}}
 p{{color:{muted};margin:0 0 6px}}
-.host{{color:{ink};font-weight:600}}
-.row{{display:flex;gap:10px;margin-top:26px;flex-wrap:wrap}}
-a.btn{{display:inline-flex;align-items:center;height:38px;padding:0 18px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px}}
-a.primary{{background:{btnBg};color:{btnInk}}} a.ghost{{color:{ink};border:1px solid {line}}}
-a.btn:hover{{opacity:.85}}
-code{{display:block;margin-top:28px;color:{muted};font:12px ui-monospace,Consolas,monospace;opacity:.8}}
+.host{{color:{ink};font-weight:650}}
+.row{{display:flex;gap:10px;margin-top:22px;flex-wrap:wrap}}
+a.btn{{display:inline-flex;align-items:center;height:40px;padding:0 20px;border-radius:12px;text-decoration:none;font-weight:650;font-size:14px;transition:transform .15s,box-shadow .2s,opacity .2s}}
+a.primary{{background:linear-gradient(135deg,#7c6cff,#22d3ee);color:#fff;box-shadow:0 6px 22px rgba(124,108,255,.35)}} a.ghost{{color:{ink};border:1px solid {line};background:{card}}}
+a.btn:hover{{transform:translateY(-1px);box-shadow:0 10px 28px rgba(124,108,255,.45)}} a.btn:active{{transform:translateY(1px) scale(.98)}}
+code{{display:block;margin-top:22px;color:{muted};font:12px ui-monospace,Consolas,monospace;opacity:.7}}
+.game{{width:min(860px,100%);animation:in .6s .12s cubic-bezier(.22,1,.36,1) both}}
+canvas{{display:block;width:100%;height:clamp(240px,42vh,360px);border-radius:20px;border:1px solid {line};box-shadow:0 20px 60px rgba(0,0,0,{(dark ? ".45" : ".12")});outline:none;cursor:pointer;touch-action:none}}
+canvas:focus-visible{{box-shadow:0 0 0 3px rgba(124,108,255,.6)}}
+.hint{{text-align:center;font-size:12px;margin-top:10px}}
+.back{{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;padding:10px 12px 10px 18px;border-radius:16px;background:{card};backdrop-filter:blur(14px);border:1px solid {line};box-shadow:0 12px 40px rgba(0,0,0,.3);animation:in .4s both}}
+.back[hidden]{{display:none}}
 </style></head><body><main><div class='card'>
-<svg viewBox='0 0 24 24'>{k.Icon}</svg>
+<div class='icon'><svg viewBox='0 0 24 24'>{k.Icon}</svg></div>
 <h1>{e(k.Title)}</h1>
 <p><span class='host'>{e(host)}</span></p>
 <p>{e(k.Body)}</p>
 <div class='row'>{(retry.Length > 0 && !certificate ? $"<a class='btn primary' href='{e(retry)}'>Try again</a>" : "")}{(k.Search ? $"<a class='btn ghost' href='{e(search)}'>Search for {e(host)}</a>" : "")}</div>
-<code>{e(code)}</code>
-</div></main></body></html>";
+{(game == null ? $"<code>{e(code)}</code>" : "")}
+</div>{gameHtml}</main>{script}</body></html>";
  }
+}
+
+/// Signal Run's saved progress (the offline page's game): the best score and where that run ended, electrons collected over
+/// all runs (they unlock skins), the skin worn, sound, and today's finished missions.
+public sealed class OfflineGame
+{
+ public int Best { get; set; }
+ public int BestDistance { get; set; }
+ public int Electrons { get; set; }
+ public int Skin { get; set; }
+ public bool Mute { get; set; }
+ public string Day { get; set; } = "";
+ public List<string> Done { get; set; } = [];
 }

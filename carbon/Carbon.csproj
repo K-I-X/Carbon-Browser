@@ -14,7 +14,7 @@
  </PropertyGroup>
  <ItemGroup>
   <EmbeddedResource Include="Shell\**\*" LogicalName="Carbon.Content.Shell/%(RecursiveDir)%(Filename)%(Extension)" />
-  <EmbeddedResource Include="Assets\Readability.js;Assets\LoginObserver.js;Assets\setup.md;Assets\make.md" LogicalName="Carbon.Content.Assets/%(Filename)%(Extension)" />
+  <EmbeddedResource Include="Assets\Readability.js;Assets\LoginObserver.js;Assets\offline-game.js;Assets\setup.md;Assets\make.md" LogicalName="Carbon.Content.Assets/%(Filename)%(Extension)" />
   <EmbeddedResource Include="Assets\roles\**\*.md" LogicalName="Carbon.Content.Assets/roles/%(RecursiveDir)%(Filename)%(Extension)" />
   <EmbeddedResource Include="Assets\skills\*.md" LogicalName="Carbon.Content.Assets/skills/%(Filename)%(Extension)" />
   <Content Include="Assets\carbon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
