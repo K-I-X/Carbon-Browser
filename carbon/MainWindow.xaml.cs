@@ -525,7 +525,7 @@ public partial class MainWindow : Window
    if(showError){
     // Show a full-page error for this cause; keep the address on the page that failed.
     tab.ShowingError=true;tab.Url=failedUrl;
-    core.NavigateToString(ErrorPages.Html(status,tab.CertificateError,failedUrl,dark,Prefs.SearchEngine,tab.Private?null:Prefs.OfflineGame));
+    core.NavigateToString(ErrorPages.Html(status,tab.CertificateError,failedUrl,dark,Prefs.SearchEngine,tab.Private?null:Prefs.OfflineGame,tab.Private?null:SavedPages()));
     if(tab==Shown)UpdateChrome();
    }
   };
@@ -581,6 +581,7 @@ public partial class MainWindow : Window
    }
    // Signal Run on the offline page keeps its best score, electrons, skin and missions (never from a private tab).
    if (tab.ShowingError && !tab.Private && e.WebMessageAsJson.Contains("\"carbon-offline\"")) { SaveOfflineGame(e.WebMessageAsJson); return; }
+   if (tab.ShowingError && !tab.Private && e.WebMessageAsJson.Contains("\"carbon-open-saved\"")) { OpenSavedPage(tab, core, e.WebMessageAsJson); return; }
    await ReceiveHidden(tab, e);
   };
   core.WebMessageReceived += async (_, e) => { if (Off()) return; await ReceiveLogin(tab, e); };

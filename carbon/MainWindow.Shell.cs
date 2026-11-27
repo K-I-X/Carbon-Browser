@@ -317,6 +317,7 @@ public partial class MainWindow
      case "importBookmarks":ChooseImport("bookmarks");break;
      case "exportBookmarks":_ = Dispatcher.BeginInvoke(ExportBookmarks);break;
      case "reopen":ReopenTab();break;
+     case "savePage":_=SavePageOffline();break;
      case "focus":focusMode=!focusMode;ApplyLayout();break;
      case "panel":panel=S("name");break;
      case "drag":ReleaseCapture();SendMessage(new WindowInteropHelper(this).Handle,0xA1,new IntPtr(2),IntPtr.Zero);break;

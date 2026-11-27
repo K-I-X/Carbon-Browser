@@ -1,5 +1,6 @@
 import { useState } from "react"
-import { Trash2, Puzzle, FolderOpen, ExternalLink, RotateCw, Settings2, ShieldCheck, Cookie } from "lucide-react"
+import { Trash2, Puzzle, FolderOpen, ExternalLink, RotateCw, Settings2, ShieldCheck, Cookie, Search, PanelTop } from "lucide-react"
+import type { CSSProperties } from "react"
 import { Button } from "@/components/ui/button"
 import { MAC } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
@@ -24,12 +25,7 @@ export function BrowserTools({pane,data,send,url,tracking,memory,autofill}:{pane
   {data.error&&<p className="tool-error" role="alert">{data.error}</p>}
   {(pane==="profiles"||pane==="import")&&<DataTools pane={pane} data={data} send={send}/>}
   {pane==="passwords"&&<PasswordsPane data={data} send={send} ask={ask} url={url}/>}
-  {pane==="extensions"&&<>
-   <div className="tool-intro"><Puzzle/><p>Open any extension in the Chrome Web Store and press <strong>Add to Carbon</strong> next to the address bar. You review its permissions before it installs.</p></div>
-   <div className="tool-toolbar"><Button disabled={data.downloading} onClick={()=>send("openStore")}>{data.downloading?"Downloading…":<><ExternalLink/>Chrome Web Store</>}</Button><Button variant="ghost" onClick={()=>send("extensionChoose")}><FolderOpen/>Load folder</Button><Button variant="ghost" size="icon-sm" aria-label="Refresh extensions" onClick={refresh}><RotateCw/></Button></div>
-   {data.candidate&&<div className="extension-review"><strong>Add {data.candidate.name}?</strong><p>Declared permissions and website access:</p>{data.candidate.desktopCompanion&&<p className="tool-caption">Requires its desktop companion app. The publisher must support Carbon; installing an extension alone does not prove its desktop features work.</p>}<ScrollArea className="permission-list">{data.candidate.permissions.length?data.candidate.permissions.map(p=><code key={p}>{p}</code>):<span>No permissions requested.</span>}</ScrollArea><div className="tool-toolbar"><Button variant="ghost" onClick={()=>send("extensionCancel")}>Cancel</Button><Button onClick={()=>send("extensionInstall")}>Add extension</Button></div></div>}
-   <ScrollArea className="tools-list">{data.extensions?.filter(e=>!isGone("ext:"+e.id)).map(e=><div className="tool-row" key={e.id}><Puzzle/><div className="tool-copy"><strong>{e.name}</strong><small>{e.enabled?"Enabled":"Disabled"}</small></div>{e.hasPopup&&<Button variant="ghost" size="icon-sm" aria-label={"Open "+e.name+" popup"} onClick={()=>send("extensionPopup",{id:e.id})}><Puzzle/></Button>}{e.hasPage&&<Button variant="ghost" size="icon-sm" aria-label={"Open "+e.name+" page"} onClick={()=>send("extensionPage",{id:e.id})}><Settings2/></Button>}<Switch aria-label={"Enable "+e.name} checked={e.enabled} onCheckedChange={()=>send("extensionToggle",{id:e.id})}/><Button variant="ghost" size="icon-sm" aria-label={"Remove "+e.name} onClick={()=>destroy({key:"ext:"+e.id,title:"Remove this extension?",body:e.name+" is removed from your regular profile, with its settings.",action:"Remove extension",done:"Extension removed",run:()=>send("extensionRemove",{id:e.id})})}><Trash2/></Button></div>)}{data.extensions?.length===0&&<p className="empty-state">No extensions installed.</p>}</ScrollArea>
-  </>}
+  {pane==="extensions"&&<Extensions data={data} send={send} refresh={refresh}/>}
   {pane==="cookies"&&<>
    <div className="tool-intro"><Cookie/><p>{data.isPrivate?"Cookies in your private session.":"Cookies saved by websites in your regular profile."} Cookie values stay inside the browser engine.</p></div>
    <div className="tool-toolbar"><Input aria-label="Search cookies" placeholder="Find a website or cookie" value={filter} onChange={e=>setFilter(e.target.value)}/><Button variant="ghost" size="icon-sm" aria-label="Refresh cookies" onClick={refresh}><RotateCw/></Button></div>
@@ -44,4 +40,36 @@ export function BrowserTools({pane,data,send,url,tracking,memory,autofill}:{pane
   </>}
   <AlertDialog open={!!confirmation} onOpenChange={v=>{if(!v)setConfirmation(null)}}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirmation?.title}</AlertDialogTitle><AlertDialogDescription>{confirmation?.body}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={()=>{confirmation?.run();setConfirmation(null)}}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
  </div>
+}
+
+// Popular extensions people add first: each opens its page in the Chrome Web Store, where Add to Carbon installs it after
+// you review what it can do.
+const PICKS:[string,string][]=[["Dark Reader","Dark mode for every website"],["Grammarly","Writing help as you type"],["Google Translate","Translate words and pages"],["Bitwarden","Password manager"],["Google Docs Offline","Docs without the internet"],["Read Aloud","Reads pages out loud"],["SponsorBlock","Skips sponsor segments on YouTube"],["Return YouTube Dislike","Shows dislikes again"]]
+const hueOfName=(s:string)=>[...s].reduce((h,c)=>(h*31+c.charCodeAt(0))%360,7)
+/// Extensions: what's installed as cards with their own icons, on and off, popup, options and remove; and where to get more.
+function Extensions({data,send,refresh}:{data:ToolData;send:Send;refresh:()=>void}){
+ const [find,setFind]=useState("")
+ const list=(data.extensions??[]).filter(e=>!isGone("ext:"+e.id)&&e.name.toLowerCase().includes(find.trim().toLowerCase()))
+ const all=(data.extensions??[]).filter(e=>!isGone("ext:"+e.id))
+ return <>
+  <div className="ext-hero"><Puzzle/><div><b>{all.length?`${all.length} extension${all.length===1?"":"s"}`:"Extensions"}</b><p>Add anything from the Chrome Web Store: open an extension there and press <strong>Add to Carbon</strong>. You see what it can do before it installs.</p></div>
+   <div className="ext-hero-actions"><Button size="sm" disabled={data.downloading} onClick={()=>send("openStore")}>{data.downloading?"Downloading…":<><ExternalLink/>Web Store</>}</Button><Button size="sm" variant="ghost" onClick={()=>send("extensionChoose")}><FolderOpen/>Load folder</Button></div></div>
+  {data.candidate&&<div className="extension-review"><strong>Add {data.candidate.name}?</strong><p>Declared permissions and website access:</p>{data.candidate.desktopCompanion&&<p className="tool-caption">Requires its desktop companion app. The publisher must support Carbon; installing an extension alone does not prove its desktop features work.</p>}<ScrollArea className="permission-list">{data.candidate.permissions.length?data.candidate.permissions.map(p=><code key={p}>{p}</code>):<span>No permissions requested.</span>}</ScrollArea><div className="tool-toolbar"><Button variant="ghost" onClick={()=>send("extensionCancel")}>Cancel</Button><Button onClick={()=>send("extensionInstall")}>Add extension</Button></div></div>}
+  <div className="ext-tools">{all.length>3&&<Input aria-label="Find an extension" placeholder="Find an extension" value={find} onChange={e=>setFind(e.target.value)}/>}<Button variant="ghost" size="icon-sm" aria-label="Refresh extensions" onClick={refresh}><RotateCw/></Button></div>
+  <ScrollArea className="tools-list">
+   {all.length===0?<div className="ext-empty"><Puzzle/><b>No extensions yet</b><span>Start with one of these, or browse the Web Store.</span></div>
+    :<div className="ext-grid">{list.map(e=><article className="ext-card" key={e.id} data-off={!e.enabled||undefined} style={{"--hue":hueOfName(e.name)} as CSSProperties}>
+     <div className="ext-card-top"><span className="ext-card-icon">{e.icon?<img src={e.icon} alt=""/>:<Puzzle/>}</span><div className="ext-card-name"><strong title={e.name}>{e.name}</strong><small>{e.enabled?"On":"Off"}</small></div></div>
+     <div className="ext-card-bar">
+      {e.hasPopup&&<button className="ext-card-action" disabled={!e.enabled} onClick={()=>send("extensionPopup",{id:e.id})}><PanelTop/>Open</button>}
+      {e.hasPage&&<button className="ext-card-action" onClick={()=>send("extensionPage",{id:e.id})}><Settings2/>Options</button>}
+      <button className="ext-card-action is-danger" aria-label={"Remove "+e.name} onClick={()=>destroy({key:"ext:"+e.id,title:"Remove this extension?",body:e.name+" is removed from your regular profile, with its settings.",action:"Remove extension",done:"Extension removed",run:()=>send("extensionRemove",{id:e.id})})}><Trash2/></button>
+      <Switch aria-label={"Enable "+e.name} checked={e.enabled} onCheckedChange={()=>send("extensionToggle",{id:e.id})}/>
+     </div>
+    </article>)}{list.length===0&&<p className="empty-state">No extensions match.</p>}</div>}
+   <div className="ext-picks-title">Popular picks</div>
+   <div className="ext-picks">{PICKS.map(([name,what])=><button key={name} className="ext-pick" style={{"--hue":hueOfName(name)} as CSSProperties} onClick={()=>send("new",{url:"https://chromewebstore.google.com/search/"+encodeURIComponent(name)})}><span>{name[0]}</span><span><b>{name}</b><small>{what}</small></span></button>)}
+    <button className="ext-pick" style={{"--hue":250} as CSSProperties} onClick={()=>send("openStore")}><span><Search size={14}/></span><span><b>Browse all</b><small>The whole Chrome Web Store</small></span></button></div>
+  </ScrollArea>
+ </>
 }

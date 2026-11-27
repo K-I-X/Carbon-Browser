@@ -39,6 +39,8 @@ import { homeIdeas, rankSuggestions, type AddressPick, type HomeIdea } from "./s
 import { BrowserTools } from "./BrowserTools"
 import { SaveLoginBar } from "./Passwords"
 import { GetStarted, Welcome, startCreating } from "./Welcome"
+import { Backdrop, Widgets } from "./Widgets"
+import { LookSettings } from "./LookSettings"
 import { Tour } from "./Tour"
 import { Confirmer, deleteChat, destroy, fire, isAsking, isGone, useGone } from "./Undo"
 import { draftSettings, sent, takeDrafts } from "./drafts"
@@ -742,6 +744,7 @@ export default function App() {
        <MenuPanelItem name="find" label="Find in page" icon={<Search />} keys="Ctrl F" />
        <DropdownMenuItem onSelect={()=>send("reader")}><BookOpen/>Reading mode</DropdownMenuItem>
        <DropdownMenuItem onSelect={() => send("pictureInPicture")}><ExternalLink />Picture in picture</DropdownMenuItem>
+       <DropdownMenuItem disabled={!active?.url || active?.isPrivate} onSelect={() => send("savePage")}><Download />Save page for offline</DropdownMenuItem>
        <DropdownMenuSeparator />
        <DropdownMenuItem onSelect={() => send("fullscreen")}><Expand />Full screen<DropdownMenuShortcut>{MAC ? "⌃⌘F" : "F11"}</DropdownMenuShortcut></DropdownMenuItem>
        <DropdownMenuItem onSelect={() => send("focus")}><Expand />{state.focusMode ? "Leave focus mode" : "Focus mode"}</DropdownMenuItem>
@@ -844,6 +847,7 @@ export default function App() {
       {driven && working && <PageControl key={driven.id} tab={driven} agent={working} who={driverOf(ai, driven)} chat={!split} ai={ai} />}
       {pair && snapshot && pairShot && <img className={cn("page-snapshot", pair.right !== active?.id && "is-right")} src={pairShot} alt="" style={{ width: `calc((100% - 6px) * ${pair.right === active?.id ? pair.ratio : 1 - pair.ratio})` }} />}
       {active?.url || active?.chatId || active?.id === "empty" /* the placeholder before the host's tabs: nothing, not a new tab with a live companion */ ? (snapshot && <img className={cn("page-snapshot", pair?.right === active?.id && "is-right")} src={snapshot} alt="" style={pair ? { width: `calc((100% - 6px) * ${pair.right === active?.id ? 1 - pair.ratio : pair.ratio})` } : undefined} />) : (!active?.isPrivate || state.incognito && view !== "home") && !state.noAi && ai && companion && (!!ai.companions?.length || view !== "home") && (state.preferences.newTab !== "sites" || view !== "home") ? <motion.div key={active?.id} className="new-tab-page is-home" style={{ "--hue": hueOf(companion) } as CSSProperties} initial={{ opacity: 0, y: reduced ? 0 : 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reduced ? .01 : .38, ease: [.22, 1, .36, 1] }}>
+       {!active?.isPrivate && <Backdrop />}
        <HomeRail view={view} setView={setView} profile={state.profileName} onSettings={() => open("settings")} />
        <div className="home-main">
         {view === "chats" ? <ChatHistory ai={mine!} send={send} onNew={() => setView("home")} />
@@ -872,15 +876,18 @@ export default function App() {
            {ideas.length > 0 && <div className="home-ideas"><h2>Try one of these</h2><div>{ideas.map(({ kind, label, why, prompt }) => { const [Icon, color] = IDEA_LOOKS[kind]
             return <button key={label} className="home-idea" data-kind={kind} onClick={() => send("aiSend", { text: prompt, home: true, companion: companion.id })}><Icon data-color={color} aria-hidden /><b>{label}</b><small>{why}</small></button> })}</div></div>}
            {state.bookmarks.length > 0 && <div className="speed-dial">{state.bookmarks.slice(0, 8).map(b => <BookmarkMenu key={b.url} b={b} onEdit={editBookmark}><button className="speed-dial-tile" title={b.url} onClick={() => send("navigate", { url: b.url })}><span className="speed-dial-letter">{b.favicon ? <img src={b.favicon} alt="" /> : (host(b.url)[0] ?? "•").toUpperCase()}</span><span className="speed-dial-name">{b.title || host(b.url)}</span></button></BookmarkMenu>)}</div>}
+           {!active?.isPrivate && !state.secondary && <Widgets send={send} />}
           </div>
          </>}
        </div>
       </motion.div> : <motion.div key={active?.id} className="new-tab-page" initial={{ opacity: 0, y: reduced ? 0 : 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reduced ? .01 : .38, ease: [.22, 1, .36, 1] }}>
+       {!active?.isPrivate && <Backdrop />}
        <Face size={64} mood={active?.isPrivate ? "sleep" : "idle"} className="new-tab-buddy" />
        <h1>{active?.isPrivate ? "Private tab" : greeting()}</h1>
        <p>{active?.isPrivate ? "A little privacy." : "Where to?"}</p>
        <Button variant="outline" className="start-search" onClick={e => openAddress(e.currentTarget)}><Search /><span>Search or enter an address</span><kbd>{keys("Ctrl L")}</kbd></Button>
        {!active?.isPrivate && state.bookmarks.length > 0 && <div className="speed-dial">{state.bookmarks.slice(0, 8).map(b => <BookmarkMenu key={b.url} b={b} onEdit={editBookmark}><button className="speed-dial-tile" title={b.url} onClick={() => send("navigate", { url: b.url })}><span className="speed-dial-letter">{b.favicon ? <img src={b.favicon} alt="" /> : (host(b.url)[0] ?? "•").toUpperCase()}</span><span className="speed-dial-name">{b.title || host(b.url)}</span></button></BookmarkMenu>)}</div>}
+       {!active?.isPrivate && <Widgets send={send} />}
        {!active?.isPrivate && ai && !state.noAi && !ai.companions?.length && <Button className="new-tab-create" onClick={() => { startCreating(); send("welcomeAgain") }}><Sparkles />Create your companion</Button>}
        {!active?.isPrivate && !state.welcome && !state.secondary && <GetStarted isDefault={state.preferences.isDefaultBrowser} layout={state.preferences.tabLayout} send={send} onImport={() => open("import")} />}
        {active?.isPrivate && <span className="private-caption"><LockKeyhole />This tab and its history won't be saved.</span>}
@@ -982,6 +989,7 @@ export default function App() {
        <SetCard title="Theme"><div className="set-pad" id="set-theme"><div className="theme-choices">{["Light", "Dark", "System"].map(theme => <Button key={theme} variant="outline" className={cn("theme-choice", state.preferences.theme === theme && "chosen")} onClick={() => preference("theme", theme)}>
         <div className={cn("theme-preview", theme.toLowerCase())}><i /><span /><b /></div><span>{theme === "Dark" ? "Black" : theme}{state.preferences.theme === theme && <Check />}</span>
        </Button>)}</div></div></SetCard>
+       <LookSettings />
        <SetCard title="Tabs">
         <SetRow id="layout" title="Tab layout" help="Classic puts tabs across the top. Modern puts them down the side, with your chats."><Select value={state.preferences.tabLayout ?? "Classic"} onValueChange={v => preference("tabLayout", v)}><SelectTrigger className="w-32" aria-label="Tab layout"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Classic">Classic</SelectItem><SelectItem value="Modern">Modern</SelectItem></SelectContent></Select></SetRow>
         <SetRow id="tearoff" title="Drag tabs into their own window" help="Drag a tab out of the tab list to open it in a new window. Right-click a tab and choose Move to window to send it back."><Switch aria-label="Drag tabs into their own window" checked={!!state.preferences.tearOff} onCheckedChange={enabled => preference("tearOff", String(enabled))} /></SetRow>
@@ -1112,6 +1120,7 @@ The first call waits for me to approve you in Carbon. Private tabs, passwords an
 }
 
 import "./motion.css"
+import "./carbon-theme.css"
 
 function BookmarkMenu({b,onEdit,children}:{b:{title:string;url:string};onEdit:(b:{title:string;url:string})=>void;children:React.ReactNode}){
  const {setContext}=useContext(UICtx)!

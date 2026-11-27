@@ -1,6 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './theme'
+import './interact'
 import App from './App.tsx'
 import { Mascot, MascotSheet, MascotStage, loadEngine, type MascotState, type Tier } from './Mascot'
 import { DEFAULT_LOOK, type Look } from './look'

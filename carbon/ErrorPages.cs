@@ -39,19 +39,20 @@ internal static class ErrorPages
   };
  }
 
- public static string Crashed(string url, bool dark) => Render(new(Alert, "This page crashed", "Something on this page made it stop working. Your other tabs are fine."), url, dark, "", false, "RenderProcessExited", null);
+ public static string Crashed(string url, bool dark) => Render(new(Alert, "This page crashed", "Something on this page made it stop working. Your other tabs are fine."), url, dark, "", false, "RenderProcessExited", null, null);
 
- public static string Html(CoreWebView2WebErrorStatus status, bool certificate, string url, bool dark, string searchEngine, OfflineGame? game = null)
+ public static string Html(CoreWebView2WebErrorStatus status, bool certificate, string url, bool dark, string searchEngine, OfflineGame? game = null, IReadOnlyList<SavedPage>? saved = null)
  {
   var kind = Pick(status, certificate);
-  return Render(kind, url, dark, searchEngine, certificate, status.ToString(), kind.Icon == Wifi ? game ?? new() : null);
+  bool offline = kind.Icon == Wifi;
+  return Render(kind, url, dark, searchEngine, certificate, status.ToString(), offline ? game ?? new() : null, offline ? saved : null);
  }
 
  /// Signal Run (Assets/offline-game.js), with the player's saved best, electrons and skin. Read once.
  static string? gameJs;
  static string GameJs => gameJs ??= AppContent.ReadAsset("offline-game.js").GetAwaiter().GetResult();
 
- static string Render(Kind k, string url, bool dark, string searchEngine, bool certificate, string code, OfflineGame? game)
+ static string Render(Kind k, string url, bool dark, string searchEngine, bool certificate, string code, OfflineGame? game, IReadOnlyList<SavedPage>? saved)
  {
   string host = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : url;
   string e(string s) => WebUtility.HtmlEncode(s);
@@ -65,6 +66,7 @@ internal static class ErrorPages
   if (game != null) {
    string save = System.Text.Json.JsonSerializer.Serialize(new { best = game.Best, bestDist = game.BestDistance, electrons = game.Electrons, skin = game.Skin, mute = game.Mute, day = game.Day, done = game.Done, dark });
    script = "<script>window.CARBON_OFFLINE=" + save.Replace("<", "\\u003c") + ";</script><script>" + GameJs.Replace("</script", "<\\/script") + "</script>"
+    + "<script>document.querySelectorAll('.saved button').forEach(x=>x.addEventListener('click',()=>{try{chrome.webview.postMessage({kind:'carbon-open-saved',id:x.dataset.id})}catch(e){}}));</script>"
     + "<script>(()=>{const b=document.getElementById('back');let was=navigator.onLine;const on=()=>{if(navigator.onLine&&!was)b.hidden=false;was=navigator.onLine};addEventListener('online',()=>{was=false;on()});addEventListener('offline',()=>{was=false});setInterval(on,3000);})();</script>";
   }
   string gameHtml = game == null ? "" : $"""
@@ -72,6 +74,7 @@ internal static class ErrorPages
     <canvas id='signal-run' aria-label='Signal Run. Press Space to start.'></canvas>
     <p class='hint'>Signal Run · Space or tap to jump, twice to double-jump, ↓ to duck · M sound · P pause</p>
    </section>
+   {(saved is { Count: > 0 } ? "<section class='saved' aria-label='Pages you saved'><h2>Read offline</h2><div>" + string.Concat(saved.Take(12).Select(p => $"<button data-id='{e(p.Id)}' title='{e(p.Url)}'><b>{e(p.Title)}</b><small>{e(Uri.TryCreate(p.Url, UriKind.Absolute, out var su) ? su.Host : "")} · saved {p.Saved:MMM d}</small></button>")) + "</div></section>" : "")}
    <div id='back' class='back' hidden role='status'><b>You're back online.</b>{(retry.Length > 0 ? $"<a class='btn primary' href='{e(retry)}'>Open {e(host)}</a>" : "")}</div>
    """;
   return $@"<!doctype html><html><head><meta charset='utf-8'><meta name='color-scheme' content='{(dark ? "dark" : "light")}'><title>{e(k.Title)}</title><style>
@@ -97,6 +100,10 @@ canvas:focus-visible{{box-shadow:0 0 0 3px rgba(124,108,255,.6)}}
 .hint{{text-align:center;font-size:12px;margin-top:10px}}
 .back{{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;padding:10px 12px 10px 18px;border-radius:16px;background:{card};backdrop-filter:blur(14px);border:1px solid {line};box-shadow:0 12px 40px rgba(0,0,0,.3);animation:in .4s both}}
 .back[hidden]{{display:none}}
+.saved{{width:min(860px,100%)}} .saved h2{{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:{muted};margin:0 0 10px}}
+.saved div{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}}
+.saved button{{text-align:left;padding:12px 14px;border-radius:14px;border:1px solid {line};background:{card};color:{ink};font:inherit;cursor:pointer;transition:transform .2s,border-color .2s}}
+.saved button:hover{{transform:translateY(-2px);border-color:rgba(124,108,255,.6)}} .saved b{{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}} .saved small{{color:{muted};font-size:12px}}
 </style></head><body><main><div class='card'>
 <div class='icon'><svg viewBox='0 0 24 24'>{k.Icon}</svg></div>
 <h1>{e(k.Title)}</h1>
@@ -106,6 +113,16 @@ canvas:focus-visible{{box-shadow:0 0 0 3px rgba(124,108,255,.6)}}
 {(game == null ? $"<code>{e(code)}</code>" : "")}
 </div>{gameHtml}</main>{script}</body></html>";
  }
+}
+
+/// A page saved for offline reading (Menu > Save page for offline): an MHTML file in the profile's saved-pages folder.
+public sealed class SavedPage
+{
+ public string Id { get; set; } = "";
+ public string Title { get; set; } = "";
+ public string Url { get; set; } = "";
+ public string File { get; set; } = "";
+ public DateTime Saved { get; set; }
 }
 
 /// Signal Run's saved progress (the offline page's game): the best score and where that run ended, electrons collected over

@@ -1135,7 +1135,7 @@ export function ChatView({ ai, send, mode, tabs = [], activeTab, onSettings, onF
     {ai.incognito ? <p className="chat-incognito"><LockKeyhole />Incognito chat: Carbon keeps nothing from it and deletes it when you close this window. {provider?.name ?? "Your model"} and the sites {name} visits still get what's sent to them, {provider?.api ? "and Carbon writes none of it to disk." : provider?.forgets ? `and ${provider.app || provider.name} is told not to save it on this computer.` : `and ${provider?.app || provider?.name || "its app"} may keep its own record.`} Connected apps are off in incognito windows. Memory: read only.</p>
     : companion && <Tip label={forget ? `${name} won't remember anything from this chat` : `${name} remembers useful things from this chat`}><label className="chat-memory"><Switch size="sm" aria-label="Don't remember this chat" checked={forget} onCheckedChange={on => chat ? send("chatNoMemory", { id: chat.id, on }) : setOffRecord(on)} />Don't remember this chat</label></Tip>}
     {!ai.incognito && chat && <ProfileChip chat={chat} busy={busy} send={send} />}
-    {mode === "panel" && provider && (provider.maker || ai.usage) && <p className="ai-usage"><Gauge />{[provider.billing || (provider.maker && !provider.api && "Your " + provider.name + " plan"), ai.usage].filter(Boolean).join(" · ")}</p>}
+    {mode === "panel" && provider && (provider.maker || ai.usage) && <p className="ai-usage"><Gauge />{[provider.billing || (provider.free ? "Free with Carbon AI" : provider.maker && !provider.api && "Your " + provider.name + " plan"), ai.usage].filter(Boolean).join(" · ")}</p>}
    </div></>}
   </div></div>}
  </section>
