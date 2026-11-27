@@ -25,6 +25,13 @@ public partial class MainWindow
   Environment.GetEnvironmentVariable("CARBON_QA_VERSION") is { } fake ? Version.Parse(fake) :
 #endif
   Assembly.GetEntryAssembly()?.GetName().Version ?? new Version(0, 0);
+ /// Which build of this version this is: GitHub's run number (CarbonBuild), 0 for a build made by hand. A release labels its
+ /// installer "Carbon build N", so a newer build of the same version reaches installed copies too.
+ static int CurrentBuild => int.TryParse(Assembly.GetEntryAssembly()?.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "CarbonBuild")?.Value, out int b) ? b : 0;
+ static int BuildOf(JsonElement release) => release.TryGetProperty("assets", out var assets) ? assets.EnumerateArray()
+  .Where(a => a.GetProperty("name").GetString() == "Carbon-Setup-x64.exe")
+  .Select(a => a.TryGetProperty("label", out var l) && l.GetString() is { } label && label.StartsWith("Carbon build ", StringComparison.Ordinal) && int.TryParse(label[13..], out int n) ? n : 0)
+  .FirstOrDefault() : 0;
  /// Tests' own release notes (CARBON_QA_NOTES, a whatsnew.json) in place of the ones the interface ships with.
  static JsonElement? QaNotes =>
 #if CARBON_QA
@@ -60,8 +67,11 @@ public partial class MainWindow
    var root = json.RootElement;
    string tag = root.GetProperty("tag_name").GetString() ?? "";
    if (!Version.TryParse(tag.TrimStart('v', 'V'), out var latest)) return;
-   if (latest <= CurrentVersion) { if (update != null) { update = null; PublishAll(); } return; }
-   string version = latest.ToString(3);
+   int build = BuildOf(root);
+   bool sameVersion = latest.ToString(3) == CurrentVersion.ToString(3);
+   bool newer = sameVersion ? build > CurrentBuild : latest > CurrentVersion;
+   if (!newer) { if (update != null) { update = null; PublishAll(); } return; }
+   string version = latest.ToString(3) + (sameVersion ? $" (build {build})" : "");
    if (update?.Version != version) { update = new UpdateInfo(version, ReleasePage + "tag/" + Uri.EscapeDataString(tag), null); PublishAll(); }
    if (CanSelfUpdate && (Prefs.AutoUpdate || applyWhenReady) && update.Installer == null && !updateDownloading) await DownloadUpdate(root, version);
   } catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException or IOException or UnauthorizedAccessException) { App.Log(ex); }
@@ -80,7 +90,7 @@ public partial class MainWindow
    string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Carbon", "Updates");
    Directory.CreateDirectory(dir);
    foreach (var old in Directory.EnumerateFiles(dir, "Carbon-Setup-*.exe")) try { File.Delete(old); } catch (IOException) { }
-   string target = Path.Combine(dir, "Carbon-Setup-" + version + ".exe");
+   string target = Path.Combine(dir, "Carbon-Setup-" + string.Concat(version.Split(Path.GetInvalidFileNameChars())).Replace(' ', '-') + ".exe");
    using var download = await ExtensionHttp.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
    download.EnsureSuccessStatusCode();
    var final = download.RequestMessage?.RequestUri;
