@@ -171,6 +171,7 @@ public sealed class ApiRun : AgentRun
    tools = await mcp.Tools(stop.Token);
   }
   long turnIn = 0, turnOut = 0;
+  var tried = new HashSet<string>(); // models that were busy or out of quota this turn
   int context = p.Context > 0 ? p.Context : 128_000;
   try {
    for (int step = 0; ; step++) {
@@ -181,6 +182,14 @@ public sealed class ApiRun : AgentRun
     turnIn += summedIn; turnOut += summedOut;
     Reply reply;
     try { reply = await Call(root, key, model, messages, tools); }
+    catch (ApiFailure f) when (f.Message == "busy") {
+     // Busy (overloaded) or out of its quota: the next of the provider's models answers instead, and the chat says so.
+     tried.Add(model);
+     string? next = p.Models.Select(m => m.Id).FirstOrDefault(m => !tried.Contains(m));
+     if (next == null) throw new ApiFailure("is very busy right now, or its free use for today is used up. Try again in a few minutes.");
+     Say(new AgentEvent.Note($"{model} was busy, so {next} is answering."));
+     model = next; step--; continue;
+    }
     catch (ApiFailure f) when (f.Message == "model") {
      if (p.Models.Count == 0 || model == p.Models[0].Id) throw new ApiFailure($"doesn't offer {model}. Pick another model in Settings → Models.");
      Say(new AgentEvent.Note($"{model} isn't available at {p.Name}, so this ran on {p.Models[0].Id}. You can pick another in Settings → Models."));
@@ -283,9 +292,16 @@ public sealed class ApiRun : AgentRun
    string text = await res.Content.ReadAsStringAsync(stop.Token);
    var status = res.StatusCode; var wait = RetryAfter(res); res.Dispose();
    if (status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) { ApiKeyStore.Refused.Add(p.Id); throw new ApiFailure("Key not accepted. Replace it in Settings → Models."); }
+   // Out of a quota (Gemini's free plan counts each model apart): another model, at once.
+   if (status == HttpStatusCode.TooManyRequests && (text.Contains("quota", StringComparison.OrdinalIgnoreCase) || text.Contains("RESOURCE_EXHAUSTED", StringComparison.Ordinal)) && p.Models.Count > 1) throw new ApiFailure("busy");
+   // Overloaded for a moment ("high demand", 503): try again after a short wait, twice, then another model.
+   if (status is HttpStatusCode.ServiceUnavailable or HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout or HttpStatusCode.InternalServerError || (int)status == 529) {
+    if (tries < 2) { await Task.Delay(TimeSpan.FromSeconds(tries + 1), stop.Token); continue; }
+    throw new ApiFailure("busy");
+   }
    if (status == HttpStatusCode.TooManyRequests) {
     var at = DateTime.Now + wait;
-    if (tries == 2) throw new ApiFailure($"is still limiting requests. Try again after {at:t}.");
+    if (tries == 2) throw p.Models.Count > 1 ? new ApiFailure("busy") : new ApiFailure($"is still limiting requests. Try again after {at:t}.");
     Say(new AgentEvent.Note($"{p.Name} is limiting requests. Trying again at {at:t}."));
     await Task.Delay(wait, stop.Token);
     continue;
@@ -328,7 +344,11 @@ public sealed class ApiRun : AgentRun
   using var res = await Post(At(root, "chat/completions"), key, body);
   var text = new StringBuilder(); var calls = new SortedDictionary<int, (string Id, string Name, StringBuilder Args)>(); long input = 0, output = 0;
   await foreach (var e in Stream(res)) {
-   if (e["error"] is { } error) throw new ApiFailure("answered: " + Plain(Clip(error["message"]?.ToString() ?? error.ToJsonString())));
+   if (e["error"] is { } error) {
+    string said = error["message"]?.ToString() ?? error.ToJsonString();
+    if (text.Length == 0 && calls.Count == 0 && (said.Contains("overloaded", StringComparison.OrdinalIgnoreCase) || said.Contains("high demand", StringComparison.OrdinalIgnoreCase) || said.Contains("UNAVAILABLE", StringComparison.Ordinal))) throw new ApiFailure("busy");
+    throw new ApiFailure("answered: " + Plain(Clip(said)));
+   }
    if (e["usage"] is JsonObject u) { input = u["prompt_tokens"]?.GetValue<long>() ?? input; output = u["completion_tokens"]?.GetValue<long>() ?? output; }
    var delta = e["choices"] is JsonArray { Count: > 0 } choices ? choices[0]?["delta"] : null; // the usage chunk has none
    if (delta?["content"]?.GetValue<string>() is { Length: > 0 } chunk) { Say(new AgentEvent.Message(chunk, text.Length > 0 ? "" : null)); text.Append(chunk); }
@@ -534,7 +554,8 @@ static class GeminiKey
  public const string KeyPage = "https://aistudio.google.com/apikey";
  public static readonly ApiProvider Provider = new() {
   Id = ProviderId, Kind = "openai", Name = "Gemini", Url = "https://generativelanguage.googleapis.com/v1beta/openai", Context = 1_000_000,
-  Models = [new ApiModel { Id = "gemini-flash-latest" }, new ApiModel { Id = "gemini-pro-latest" }, new ApiModel { Id = "gemini-flash-lite-latest" }],
+  // First the newest Flash; when it's busy or out of today's free use, the stable Flash, then the Lite ones (each has its own free quota).
+  Models = [new ApiModel { Id = "gemini-flash-latest" }, new ApiModel { Id = "gemini-2.5-flash" }, new ApiModel { Id = "gemini-flash-lite-latest" }, new ApiModel { Id = "gemini-2.5-flash-lite" }],
  };
  public static bool Is(Uri root) => root.Host == "generativelanguage.googleapis.com";
  static readonly HashSet<string> Words = ["type", "description", "properties", "required", "items", "enum", "format", "nullable", "minimum", "maximum", "anyOf"];
